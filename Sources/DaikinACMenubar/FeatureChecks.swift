@@ -39,7 +39,8 @@ enum FeatureChecks {
         try testMQTTPackets()
         try testShadowDocumentAndCommandBody()
         try testCommandRules()
-        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching.")
+        try testEnergySummaryAndCache()
+        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching; energy summary (today, W1–W5, month), incremental cache with 6 h cadence and GET_KWH_DATA body.")
     }
 
     // A syntactically valid, unsigned JWT built at runtime so no token-shaped literal is tracked.
@@ -410,5 +411,36 @@ enum FeatureChecks {
         try truth(on.canUseEcono && !fanMode.canUseEcono && !state.canUseExtras, "Econo needs the unit on and not FAN")
         let update = MQTT.publish(topic: ShadowClient.topic("thing-a", "update"), payload: try ShadowClient.commandBody(.setting(temperature: 25)))
         try truth(MQTT.publishContents(MQTT.Packet(type: .publish, flags: 0, body: update.dropFirst(2)))?.topic == "$aws/things/thing-a/shadow/update", "command topic")
+    }
+
+    static func testEnergySummaryAndCache() throws {
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "America/Sao_Paulo")!
+        let now = DateComponents(calendar: calendar, year: 2026, month: 10, day: 16, hour: 15).date!
+        let rows = [("2026-09-30 23:00:00", 90.0), ("2026-10-01 06:00:00", 100.0), ("2026-10-09 06:00:00", 104), ("2026-10-15 06:00:00", 110),
+                    ("2026-10-16 06:00:00", 112), ("2026-10-16 12:00:00", 113.5)].map { KWhReading(date: $0.0, kwhValue: $0.1) }
+        let summary = EnergySummary(usage: Energy.dailyUsage(rows), now: now, calendar: calendar)
+        try equal(summary.today, 3.5, "today = max today − previous day")
+        try equal(summary.weekNumber, 3, "16 October is W3")
+        try equal(summary.week, 9.5, "W3 = 15th + 16th")
+        try equal(summary.weeks, [1: 10, 2: 4, 3: 9.5], "weeks of October")
+        try equal(summary.month, 23.5, "October total")
+        try equal(summary.months, ["2026-09": 0, "2026-10": 23.5], "months of the year")
+        try equal(summary.monthDays.map(\.day), ["2026-10-01", "2026-10-09", "2026-10-15", "2026-10-16"], "days with readings this month")
+
+        var cache = EnergyCache()
+        try truth(cache.needsSync(now: now) && cache.latestRecordDate == nil, "first sync is a full pull")
+        cache.merge(rows, at: now)
+        try equal(cache.latestRecordDate, "2026-10-16 12:00:00", "last_record_date is the newest row")
+        try truth(!cache.needsSync(now: now.addingTimeInterval(5 * 3600)) && cache.needsSync(now: now.addingTimeInterval(6 * 3600)), "6 h cadence")
+        cache.merge([KWhReading(date: "2026-10-16 12:00:00", kwhValue: 113.5), KWhReading(date: "2026-10-16 18:00:00", kwhValue: 114)], at: now)
+        try equal(cache.readings.count, 7, "incremental rows merge without duplicates")
+        let restored = try JSONDecoder().decode(EnergyCache.self, from: JSONEncoder().encode(cache))
+        try equal(restored, cache, "cache round trip")
+
+        let first = Energy.requestBody(sub: "sub", thingID: "thing-a", lastRecordDate: nil)
+        try equal(first["Request_type"] as? String, "GET_KWH_DATA", "capital-R Request_type"); try truth(first["last_record_date"] is NSNull, "null on the first sync")
+        try equal(Energy.requestBody(sub: "sub", thingID: "thing-a", lastRecordDate: "2026-10-16 12:00:00")["last_record_date"] as? String, "2026-10-16 12:00:00", "incremental sync")
+        try equal(try Energy.parseRows([["date": "2026-10-01 00:00:00", "kwh_value": 1.5]]), [KWhReading(date: "2026-10-01 00:00:00", kwhValue: 1.5)], "kwh_data rows")
+        try truth(!Energy.cacheURL(thingID: "thing-a").lastPathComponent.contains("thing-a"), "cache file name hides the thing_id")
     }
 }
