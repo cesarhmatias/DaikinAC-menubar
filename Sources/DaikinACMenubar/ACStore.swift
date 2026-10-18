@@ -23,6 +23,9 @@ struct StoredSession: Codable {
     @Published private(set) var unitType: String?
     @Published private(set) var sendingCommand: Port1?
     @Published var notice: String?
+    @Published private(set) var energy: EnergySummary?
+    @Published private(set) var energyCache: EnergyCache?
+    @Published private(set) var syncingEnergy = false
     // Off by default: commands change a physical device, so the user turns them on in Settings.
     @Published var commandsAllowed = UserDefaults.standard.bool(forKey: "commandsAllowed") {
         didSet { UserDefaults.standard.set(commandsAllowed, forKey: "commandsAllowed") }
@@ -106,7 +109,7 @@ struct StoredSession: Codable {
         if let id = thing?.id { try? Keychain.save(id, as: .selectedThing) } else { Keychain.delete(.selectedThing) }
         guard changed else { return }
         disconnectShadow()
-        state = nil; pendingDesired = nil; lastRead = nil; unitType = nil
+        state = nil; pendingDesired = nil; lastRead = nil; unitType = nil; energy = nil; energyCache = nil
         if panelVisible { Task { await connectShadow() } }
     }
 
@@ -165,6 +168,32 @@ struct StoredSession: Codable {
         current?.close()
     }
 
+    // MARK: Energy
+
+    // Shows the cached readings at once and asks the server for newer rows at most every 6 h.
+    func loadEnergy() async {
+        guard signedIn, let thing = selectedThing, !syncingEnergy else { return }
+        var cache = Energy.loadCache(thingID: thing.id)
+        show(cache)
+        guard cache.needsSync() else { return }
+        syncingEnergy = true
+        defer { syncingEnergy = false }
+        do {
+            let rows = try await Energy.fetch(try await validTokens(), thingID: thing.id, lastRecordDate: cache.latestRecordDate)
+            guard thing.id == selectedThing?.id else { return }
+            cache.merge(rows, at: Date())
+            try Energy.saveCache(cache, thingID: thing.id)
+            show(cache)
+        } catch {
+            self.error = "Could not sync energy data: \(error.localizedDescription)"
+        }
+    }
+
+    private func show(_ cache: EnergyCache) {
+        energyCache = cache
+        energy = cache.readings.isEmpty ? nil : EnergySummary(usage: Energy.dailyUsage(cache.rows), now: Date())
+    }
+
     // MARK: Commands
 
     private var commandTimeout: Task<Void, Never>?
@@ -220,7 +249,7 @@ struct StoredSession: Codable {
 
     private func forgetSession() {
         disconnectShadow()
-        tokens = nil; accountEmail = nil; thingInfo = nil; state = nil; credentials = nil; pendingDesired = nil; lastRead = nil
+        tokens = nil; accountEmail = nil; thingInfo = nil; state = nil; energy = nil; energyCache = nil; credentials = nil; pendingDesired = nil; lastRead = nil
         Keychain.delete(.session)
     }
 }
