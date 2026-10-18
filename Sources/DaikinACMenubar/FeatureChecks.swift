@@ -39,7 +39,7 @@ enum FeatureChecks {
         try testMQTTPackets()
         try testShadowDocumentAndCommandBody()
         try testCommandRules()
-        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules and confirmation matching.")
+        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching.")
     }
 
     // A syntactically valid, unsigned JWT built at runtime so no token-shaped literal is tracked.
@@ -399,6 +399,15 @@ enum FeatureChecks {
         try truth(after.satisfies(.setting(temperature: 25)) && !state.satisfies(.setting(temperature: 25)), "confirmation compares changed keys")
         var on = state; on.power = 1
         try truth(on.satisfies(.setting(mode: .cool)) && !state.satisfies(.setting(mode: .cool)), "mode command also needs power on")
+        // Extras follow the official app's More screen.
+        var running = on; running.powerchill = 1; running.coanda = 1
+        try equal(running.setting(econo: true), { var p = Port1(); p.econo = 1; p.powerchill = 0; return p }(), "Econo turns PowerChill off")
+        var econoOn = on; econoOn.econo = 1; econoOn.coanda = 1
+        try equal(econoOn.setting(powerchill: true), { var p = Port1(); p.powerchill = 1; p.econo = 0; p.coanda = 0; return p }(), "PowerChill turns Econo and Coanda off")
+        try equal(running.setting(coanda: true), { var p = Port1(); p.coanda = 1; p.fan = 17; p.powerchill = 0; return p }(), "Coanda sends automatic fan")
+        try equal(on.setting(econo: false), { var p = Port1(); p.econo = 0; return p }(), "turning Econo off sends only econo")
+        var fanMode = on; fanMode.mode = 6
+        try truth(on.canUseEcono && !fanMode.canUseEcono && !state.canUseExtras, "Econo needs the unit on and not FAN")
         let update = MQTT.publish(topic: ShadowClient.topic("thing-a", "update"), payload: try ShadowClient.commandBody(.setting(temperature: 25)))
         try truth(MQTT.publishContents(MQTT.Packet(type: .publish, flags: 0, body: update.dropFirst(2)))?.topic == "$aws/things/thing-a/shadow/update", "command topic")
     }
