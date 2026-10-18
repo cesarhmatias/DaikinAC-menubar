@@ -1,5 +1,7 @@
 import Foundation
 import CryptoKit
+import CommonCrypto
+import Network
 import BigInt
 
 // Offline checks run by `--self-check`. Nothing here touches the network, the
@@ -42,7 +44,8 @@ enum FeatureChecks {
         try testEnergySummaryAndCache()
         try testDeviceHealth()
         try testSchedulesRead()
-        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching; energy summary (today, W1–W5, month), incremental cache with 6 h cadence and GET_KWH_DATA body; subscription warning, read-only firmware check, diagnostics without sharing; comfort-profile reads (rules, SUN…SAT, settings, paged logs).")
+        try testLocalChannel()
+        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching; energy summary (today, W1–W5, month), incremental cache with 6 h cadence and GET_KWH_DATA body; subscription warning, read-only firmware check, diagnostics without sharing; comfort-profile reads (rules, SUN…SAT, settings, paged logs); LAN AES-CFB128 frames and replies match pyiotdevice, HTTP parsing, mDNS matching.")
     }
 
     // A syntactically valid, unsigned JWT built at runtime so no token-shaped literal is tracked.
@@ -497,5 +500,40 @@ enum FeatureChecks {
         try equal(page.nextToken, "t2", "next page token"); try equal(page.logs.first?.executedAt, Date(timeIntervalSince1970: 1_760_000_000), "executed_at seconds")
         try equal(Schedules.parseLogs(["data": ["next_token": "", "exec_logs": []]]).nextToken, nil, "empty token ends paging")
         try rejects("statusCode 500") { _ = try APIStatus.statusCode(["statusCode": 500, "message": "x"], endpoint: "comfortprofile") }
+    }
+
+    // Frames computed offline with pyiotdevice 1.0.20 (encrypt_aes, calu_crc) and pycryptodome 3.23.0.
+    static func testLocalChannel() throws {
+        guard let key = LocalChannel.key(fromDeviceKey: "AAECAwQFBgcICQoLDA0ODw==") else { throw Failure(detail: "device key did not decode") }
+        try equal([UInt8](key), Array(0..<16), "key = Base64(device key + newline)")
+        try truth(LocalChannel.key(fromDeviceKey: "short") == nil, "keys must be 16, 24 or 32 bytes")
+
+        let plain = Data(#"{"port1": {"temperature": 25}}"#.utf8)
+        let body = try LocalChannel.requestBody(json: plain, key: key, iv: Data(100..<116))
+        try equal(body, "ZGVmZ2hpamtsbW5vcHFyc+WdHvPPaN9aNyduquWA6etrve+5Cbns7JBlN3FCZFq3f/M=", "request frame with BZ suffix and CRC")
+
+        let reply = "yMnKy8zNzs/Q0dLT1NXW1zV3tW0V799jmaETrP4InR/6cx7iloFtU0R49VXaWd8P49uiR5MzxVFbXp+9fIFJTXYzGTVUD9q3"
+        let json = try LocalChannel.decodeReply(reply, key: key)
+        try equal((json["port1"] as? [String: Int])?["temperature"], 25, "reply with a length byte decrypts")
+
+        // The protocol doc's other shape: no length byte.
+        let iv = Data(200..<216)
+        let cipher = try LocalChannel.cfb(CCOperation(kCCEncrypt), key: key, iv: iv, Data(#"{"port1":{"power":0}}"#.utf8))
+        var frame = iv + cipher; let crc = CRC16.genibus(frame); frame.append(UInt8(crc & 0xFF)); frame.append(UInt8(crc >> 8))
+        try equal((try LocalChannel.decodeReply(frame.base64EncodedString(), key: key)["port1"] as? [String: Int])?["power"], 0, "reply without a length byte")
+        var broken = [UInt8](Data(base64Encoded: reply)!); broken[20] ^= 0xFF
+        try rejects("bad checksum") { _ = try LocalChannel.decodeReply(Data(broken).base64EncodedString(), key: key) }
+        try rejects("wrong key") { _ = try LocalChannel.decodeReply(reply, key: Data(repeating: 7, count: 16)) }
+
+        let http = Data("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nab".utf8)
+        try truth(!LocalHTTP.hasFullBody(http) && LocalHTTP.hasFullBody(http + Data("cd".utf8)), "waits for Content-Length")
+        try equal(LocalHTTP.parse(http + Data("cd".utf8))?.body, "abcd", "HTTP body"); try equal(LocalHTTP.parse(http)?.status, 200, "HTTP status")
+
+        let endpoint = NWEndpoint.service(name: "x", type: "_iota._tcp", domain: "local.", interface: nil)
+        let units = [LocalDiscovery.Unit(name: "OTHER1", apn: "X", endpoint: endpoint), LocalDiscovery.Unit(name: "DAIKIN123456", apn: nil, endpoint: endpoint)]
+        try equal(LocalDiscovery.candidates(units, apn: "daikin-123456").map(\.name), ["DAIKIN123456", "OTHER1"], "the matching unit is tried first")
+        try equal(LocalDiscovery.hostname(fromAPN: "DAIKIN:1234A567B89C"), "DAIKINA53412", "apn to hostname, as pyiotdevice")
+        let advertised = [LocalDiscovery.Unit(name: "Daikin Smart AC", apn: "DAIKIN:1234A567B89C", endpoint: endpoint)]
+        try equal(LocalDiscovery.candidates(advertised + units, apn: "DAIKINA53412").first?.apn, "DAIKIN:1234A567B89C", "thing_apn matches the advertised apn")
     }
 }
