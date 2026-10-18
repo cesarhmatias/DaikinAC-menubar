@@ -19,7 +19,7 @@ enum ACTab: String, CaseIterable, Identifiable {
         case .control: return 600
         case .energy: return 560
         case .health: return 600
-        case .schedules: return 300
+        case .schedules: return 460
         case .settings: return 560
         }
     }
@@ -345,7 +345,78 @@ struct ACView: View {
     }
 
     private var schedulesPanel: some View {
-        placeholder("Comfort profiles", "Your schedules and their run history. They are shown read-only first.", symbol: "calendar")
+        VStack(alignment: .leading, spacing: 12) {
+            if !store.signedIn {
+                placeholder("Sign in to see schedules", "Your comfort profiles and their run history appear after sign-in.", symbol: "calendar")
+            } else if store.comfortProfiles == nil {
+                HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("Loading schedules…").font(.system(size: 10)).foregroundStyle(Theme.mutedInk) }
+            } else {
+                if store.schedules.isEmpty {
+                    placeholder("No schedules", "Comfort profiles created in the Daikin app appear here.", symbol: "calendar")
+                }
+                ForEach(store.schedules) { rule in scheduleCard(rule) }
+                PanelCard {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Label("Recent runs", systemImage: "clock.arrow.circlepath").fontWeight(.semibold)
+                        if store.deviceLogs.isEmpty { Text("No runs recorded.").font(.system(size: 11)).foregroundStyle(Theme.mutedInk) }
+                        ForEach(store.deviceLogs.prefix(20)) { log in
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(log.ruleName ?? "Schedule").font(.system(size: 11, weight: .medium))
+                                    if let message = log.statusMessage, !message.isEmpty {
+                                        Text(message).font(.system(size: 9)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(log.executedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "—").font(.system(size: 10)).monospacedDigit()
+                                    Text(log.status?.capitalized ?? "").font(.system(size: 9, weight: .semibold))
+                                        .foregroundStyle(log.status?.lowercased() == "success" ? Theme.mutedInk : Theme.warning)
+                                }
+                            }
+                        }
+                        if store.logsNextToken != nil {
+                            Button("Load more") { Task { await store.loadMoreLogs() } }.controlSize(.small).disabled(store.loadingSchedules)
+                        }
+                    }
+                }
+                HStack {
+                    Text("Read-only. Schedules are edited in the Daikin app for now.").font(.system(size: 9)).foregroundStyle(Theme.faintInk)
+                    Spacer()
+                    Button { Task { await store.loadSchedules(force: true) } } label: { Image(systemName: "arrow.clockwise").font(.system(size: 10)) }
+                        .buttonStyle(.plain).foregroundStyle(Theme.mutedInk).disabled(store.loadingSchedules).help("Reload schedules")
+                }
+            }
+        }
+        .task(id: store.thingInfo) { await store.loadSchedules() }
+    }
+
+    private func scheduleCard(_ rule: ComfortRule) -> some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(rule.name).fontWeight(.semibold).lineLimit(1)
+                    Spacer()
+                    Text(rule.enabled ? "ON" : "OFF").font(.system(size: 8, weight: .bold)).tracking(0.8)
+                        .foregroundStyle(rule.enabled ? accent : Theme.mutedInk)
+                        .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(rule.enabled ? accent.opacity(0.15) : Theme.buttonFill))
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: "clock").font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+                    Text("\(rule.executeAt ?? "--:--") · \(Schedules.describe(rule.days))").font(.system(size: 11)).monospacedDigit()
+                }
+                Text(scheduleAction(rule.settings)).font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+                if rule.startDate != nil || rule.endDate != nil {
+                    Text("\(rule.startDate ?? "…") → \(rule.endDate ?? "…")").font(.system(size: 9)).foregroundStyle(Theme.faintInk)
+                }
+            }
+        }
+    }
+
+    private func scheduleAction(_ settings: Port1) -> String {
+        guard settings.power == 1 else { return "Turns the AC off" }
+        let parts = [settings.acMode?.title, settings.temperature.map { "\($0)°" }, settings.fanSpeed.map { "fan \($0.title.lowercased())" }].compactMap { $0 }
+        return "Turns the AC on" + (parts.isEmpty ? "" : ": " + parts.joined(separator: ", "))
     }
 
     private var settingsPanel: some View {
