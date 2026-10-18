@@ -58,6 +58,14 @@ struct Sensors: Codable, Equatable {
     var roomTemp: Double?
     var outTemp: Double?
     enum CodingKeys: String, CodingKey { case roomTemp = "room_temp", outTemp = "out_temp" }
+
+    // Units report 255 when a sensor has no reading (observed for out_temp).
+    static func valid(_ value: Double?) -> Double? {
+        guard let value, value > -50, value < 100 else { return nil }
+        return value
+    }
+    var room: Double? { Sensors.valid(roomTemp) }
+    var outdoor: Double? { Sensors.valid(outTemp) }
 }
 
 // Every field is optional: a reported state carries all of them, while a command
@@ -113,6 +121,18 @@ struct Port1: Codable, Equatable {
     }
 
     var isOn: Bool { power == 1 }
+    // Rules the official integration enforces before sending a change.
+    var canChangeTemperature: Bool { acMode?.temperatureRange != nil && powerchill != 1 }
+    var canChangeFan: Bool { acMode != .dry && powerchill != 1 }
+
+    // True when every key set in `change` has the same value here.
+    func satisfies(_ change: Port1) -> Bool {
+        guard let mine = Port1.dictionary(self), let wanted = Port1.dictionary(change) else { return false }
+        return wanted.allSatisfy { key, value in (mine[key] as? NSObject)?.isEqual(value) == true }
+    }
+    private static func dictionary(_ value: Port1) -> [String: Any]? {
+        (try? JSONEncoder().encode(value)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    }
     var acMode: ACMode? { mode.flatMap(ACMode.init(wire:)) }
     var fanSpeed: FanSpeed? { fan.flatMap(FanSpeed.init(rawValue:)) }
 
@@ -129,6 +149,12 @@ struct Port1: Codable, Equatable {
         return p
     }
     static func setting(temperature: Int) -> Port1 { var p = Port1(); p.temperature = clampTemperature(temperature); return p }
+    // A target one step up or down, kept inside the current mode's range.
+    func steppedTemperature(by delta: Int) -> Int? {
+        guard let range = acMode?.temperatureRange, let current = temperature else { return nil }
+        let next = min(range.upperBound, max(range.lowerBound, current + delta))
+        return next == current ? nil : Port1.clampTemperature(next)
+    }
     static func setting(fan: FanSpeed) -> Port1 { var p = Port1(); p.fan = fan.rawValue; return p }
 }
 
