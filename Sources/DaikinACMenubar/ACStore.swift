@@ -26,6 +26,11 @@ struct StoredSession: Codable {
     @Published private(set) var energy: EnergySummary?
     @Published private(set) var energyCache: EnergyCache?
     @Published private(set) var syncingEnergy = false
+    @Published private(set) var errorTranslations: [String: String] = [:]
+    @Published private(set) var firmware: FirmwareInfo?
+    @Published private(set) var checkingFirmware = false
+    @Published private(set) var diagnostics: DiagnosticReport?
+    @Published private(set) var runningDiagnostics = false
     // Off by default: commands change a physical device, so the user turns them on in Settings.
     @Published var commandsAllowed = UserDefaults.standard.bool(forKey: "commandsAllowed") {
         didSet { UserDefaults.standard.set(commandsAllowed, forKey: "commandsAllowed") }
@@ -109,7 +114,7 @@ struct StoredSession: Codable {
         if let id = thing?.id { try? Keychain.save(id, as: .selectedThing) } else { Keychain.delete(.selectedThing) }
         guard changed else { return }
         disconnectShadow()
-        state = nil; pendingDesired = nil; lastRead = nil; unitType = nil; energy = nil; energyCache = nil
+        state = nil; pendingDesired = nil; lastRead = nil; unitType = nil; energy = nil; energyCache = nil; firmware = nil; diagnostics = nil
         if panelVisible { Task { await connectShadow() } }
     }
 
@@ -194,6 +199,49 @@ struct StoredSession: Codable {
         energy = cache.readings.isEmpty ? nil : EnergySummary(usage: Energy.dailyUsage(cache.rows), now: Date())
     }
 
+    // MARK: Health
+
+    // Translates each reported code once per session (pt-BR, as the official app does).
+    func translateErrors() async {
+        guard signedIn, let thing = selectedThing, let info = thingInfo else { return }
+        for item in info.errors(for: thing) where errorTranslations[item.code] == nil && item.description == nil {
+            errorTranslations[item.code] = ""   // mark as requested so it is not asked again
+            do {
+                if let text = try await DeviceHealth.translateError(code: item.manufacturerCode ?? item.code, tokens: try await validTokens()) {
+                    errorTranslations[item.code] = text
+                }
+            } catch {
+                self.error = "Could not translate error \(item.code): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // On demand only; the firmware endpoint is not polled.
+    func checkFirmware() async {
+        guard signedIn, let thing = selectedThing, let version = state?.fwVer, !checkingFirmware else { return }
+        checkingFirmware = true
+        defer { checkingFirmware = false }
+        do {
+            firmware = try await DeviceHealth.latestFirmware(tokens: try await validTokens(), thingID: thing.id, firmwareVersion: version)
+            if firmware == nil { error = "The firmware service returned no status for this unit." }
+        } catch {
+            self.error = "Could not check firmware: \(error.localizedDescription)"
+        }
+    }
+
+    func runDiagnostics() async {
+        guard signedIn, let thing = selectedThing, !runningDiagnostics else { return }
+        runningDiagnostics = true
+        defer { runningDiagnostics = false }
+        do {
+            let credentials = try await validCredentials()
+            guard let cognitoID = credentials.identityID else { throw DaikinError.message("The Identity Pool returned no IdentityId.") }
+            diagnostics = try await DeviceHealth.runDiagnostics(tokens: try await validTokens(), cognitoID: cognitoID, thingID: thing.id)
+        } catch {
+            self.error = "Could not run diagnostics: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: Commands
 
     private var commandTimeout: Task<Void, Never>?
@@ -249,7 +297,7 @@ struct StoredSession: Codable {
 
     private func forgetSession() {
         disconnectShadow()
-        tokens = nil; accountEmail = nil; thingInfo = nil; state = nil; energy = nil; energyCache = nil; credentials = nil; pendingDesired = nil; lastRead = nil
+        tokens = nil; accountEmail = nil; thingInfo = nil; state = nil; energy = nil; energyCache = nil; firmware = nil; diagnostics = nil; errorTranslations = [:]; credentials = nil; pendingDesired = nil; lastRead = nil
         Keychain.delete(.session)
     }
 }
