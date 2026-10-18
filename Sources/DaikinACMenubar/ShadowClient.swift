@@ -208,6 +208,8 @@ enum MQTT {
     private var arrived: Set<Step> = []
     private var waiters: [Step: CheckedContinuation<Void, Error>] = [:]
     private var closed = false
+    // True once CONNECT and SUBSCRIBE have been accepted; commands wait for it.
+    private(set) var ready = false
 
     init(thingID: String) { self.thingID = thingID }
 
@@ -229,6 +231,7 @@ enum MQTT {
                 try? await self?.send(MQTT.pingreq)
             }
         }
+        ready = true
         try await requestDocument()
     }
 
@@ -244,6 +247,7 @@ enum MQTT {
     func close(_ error: Error? = nil) {
         guard !closed else { return }
         closed = true
+        ready = false
         pingTask?.cancel(); receiveTask?.cancel()
         if error == nil, let socket { socket.send(.data(MQTT.disconnect)) { _ in } }
         socket?.cancel(with: .normalClosure, reason: nil)
