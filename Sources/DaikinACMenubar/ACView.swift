@@ -17,9 +17,9 @@ enum ACTab: String, CaseIterable, Identifiable {
         switch self {
         case .control: return 510
         case .energy: return 350
-        case .health: return 450
+        case .health: return 470
         case .schedules: return 300
-        case .settings: return 340
+        case .settings: return 470
         }
     }
     // `--tab <name>` opens the panel on that tab.
@@ -32,6 +32,8 @@ enum ACTab: String, CaseIterable, Identifiable {
 struct ACView: View {
     @ObservedObject var store: ACStore
     @State private var tab: ACTab
+    @State private var email = ""
+    @State private var password = ""
     private var accent: Color { store.accent }
     init(store: ACStore) {
         self.store = store
@@ -157,10 +159,43 @@ struct ACView: View {
 
     private var healthPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            placeholder("Errors", "Reported error codes appear here with their Daikin description.", symbol: "exclamationmark.triangle")
-            placeholder("Cloud subscription", "Remote access status and expiry date. Local control does not depend on it.", symbol: "cloud")
+            if let thing = store.selectedThing, let info = store.thingInfo {
+                let errors = info.errors(for: thing)
+                PanelCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(errors.isEmpty ? "No reported errors" : "\(errors.count) reported error\(errors.count == 1 ? "" : "s")",
+                              systemImage: errors.isEmpty ? "checkmark.circle" : "exclamationmark.triangle").fontWeight(.semibold)
+                            .foregroundStyle(errors.isEmpty ? Theme.ink : Theme.warning)
+                        ForEach(errors) { item in
+                            HStack(alignment: .top) {
+                                Text(item.code).font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                Text(item.description ?? "Description arrives with error translation.").font(.system(size: 11)).foregroundStyle(Theme.mutedInk)
+                            }
+                        }
+                    }
+                }
+                PanelCard {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Cloud subscription", systemImage: "cloud").fontWeight(.semibold)
+                        detailRow("Status", thing.subscription?.status ?? "Not reported")
+                        detailRow("Expires", thing.subscription.map(expiryText) ?? "Not reported")
+                    }
+                }
+            } else {
+                placeholder("Errors", "Reported error codes appear here with their Daikin description.", symbol: "exclamationmark.triangle")
+                placeholder("Cloud subscription", "Remote access status and expiry date. Local control does not depend on it.", symbol: "cloud")
+            }
             placeholder("Firmware", "Installed version and whether an update is available. Read-only.", symbol: "cpu")
         }
+    }
+
+    private func expiryText(_ subscription: CloudSubscription) -> String {
+        guard let date = subscription.expiry else { return subscription.expiryDate ?? "Not reported" }
+        return date.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    private func detailRow(_ title: String, _ value: String) -> some View {
+        HStack { Text(title).foregroundStyle(Theme.mutedInk); Spacer(); Text(value).fontWeight(.medium) }.font(.system(size: 11))
     }
 
     private var schedulesPanel: some View {
@@ -169,15 +204,81 @@ struct ACView: View {
 
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            PanelCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Daikin account", systemImage: "person.crop.circle").fontWeight(.semibold)
-                    Text("Sign in with your own Daikin Smart AC account. Your password and tokens are kept in the macOS Keychain.")
-                        .font(.system(size: 11)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
-                    Text("Sign-in is not available in this build yet.").font(.system(size: 10)).foregroundStyle(Theme.faintInk)
+            if store.signedIn { accountCard; devicesCard } else { signInCard }
+            Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }.buttonStyle(.link).font(.system(size: 11))
+        }
+    }
+
+    private var signInCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Daikin account", systemImage: "person.crop.circle").fontWeight(.semibold)
+                Text("Sign in with your own Daikin Smart AC account. Your password is not stored; the session stays in the macOS Keychain.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                TextField("E-mail", text: $email).textFieldStyle(.roundedBorder).textContentType(.username)
+                SecureField("Password", text: $password).textFieldStyle(.roundedBorder).textContentType(.password)
+                    .onSubmit(submitSignIn)
+                HStack {
+                    Button(store.signingIn ? "Signing in…" : "Sign in", action: submitSignIn)
+                        .disabled(store.signingIn || email.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
+                    if store.signingIn { ProgressView().controlSize(.small) }
+                }
+                Text("Each click sends one sign-in request. Repeated failures can lock the account.")
+                    .font(.system(size: 10)).foregroundStyle(Theme.faintInk).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func submitSignIn() {
+        guard !store.signingIn, !password.isEmpty else { return }
+        let typed = password
+        Task { await store.signIn(email: email, password: typed); password = "" }
+    }
+
+    private var accountCard: some View {
+        PanelCard {
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle.fill").font(.system(size: 22)).foregroundStyle(Theme.mutedInk)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(store.accountEmail ?? "Signed in").fontWeight(.semibold).lineLimit(1).truncationMode(.middle)
+                    Text("Daikin Smart AC account").font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+                }
+                Spacer()
+                Button("Sign out") { store.signOut() }
+            }
+        }
+    }
+
+    private var devicesCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Label("Devices", systemImage: "air.conditioner.horizontal").fontWeight(.semibold)
+                    Spacer()
+                    if store.loadingDevices { ProgressView().controlSize(.mini) }
+                    else {
+                        Button { Task { await store.refreshDevices() } } label: { Image(systemName: "arrow.clockwise").font(.system(size: 11)) }
+                            .buttonStyle(.plain).foregroundStyle(Theme.mutedInk).help("Reload devices")
+                    }
+                }
+                if store.things.isEmpty && !store.loadingDevices {
+                    Text("No devices on this account.").font(.system(size: 11)).foregroundStyle(Theme.mutedInk)
+                }
+                ForEach(store.things) { thing in
+                    Button { store.select(thing) } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: thing.id == store.selectedThing?.id ? "largecircle.fill.circle" : "circle")
+                                .foregroundStyle(thing.id == store.selectedThing?.id ? accent : Theme.mutedInk)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(thing.name).font(.system(size: 12, weight: .medium))
+                                if let model = thing.model { Text(model).font(.system(size: 10)).foregroundStyle(Theme.mutedInk) }
+                            }
+                            Spacer()
+                            if thing.isAuthorized == false { Text("Not authorized").font(.system(size: 9)).foregroundStyle(Theme.warning) }
+                        }.contentShape(Rectangle())
+                    }.buttonStyle(.plain)
                 }
             }
-            Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }.buttonStyle(.link).font(.system(size: 11))
         }
     }
 
