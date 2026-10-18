@@ -9,6 +9,15 @@ menu bar, over your Wi-Fi or through the cloud.
 > Unofficial. Not affiliated with, endorsed by or supported by Daikin or IOTA Labs. Use it only
 > with your own account and your own devices.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/media/control.png" width="24%" alt="Control tab: AC unit with airflow, target temperature slider, modes, fan and extras">
+  <img src="docs/media/energy.png" width="24%" alt="Energy tab: today, week and month totals with a daily chart">
+  <img src="docs/media/health.png" width="24%" alt="Health tab: errors, cloud subscription, firmware and diagnostics">
+  <img src="docs/media/schedules.png" width="24%" alt="Schedules tab: comfort profiles and recent runs">
+</p>
+
 ## Features
 
 - **Control** — power, mode (Auto, Dry, Cool, Heat, Fan), target temperature with a slider, fan speed,
@@ -65,7 +74,8 @@ The only dependency is [attaswift/BigInt](https://github.com/attaswift/BigInt) (
 
 ## Credits
 
-The menu bar shell and design primitives are adapted from LGwebOS-menubar (MIT). The local
+Inspired by [LGwebOS-menubar](https://github.com/gabrielgreco1/LGwebOS-menubar), a native macOS menu
+bar remote for LG webOS TVs; its menu bar shell and design primitives are adapted here (MIT). The local
 protocol was cross-checked against Daikin Brazil's open-source
 [ha-custom-integration](https://github.com/daikin-br/ha-custom-integration) and
 [pyiotdevice](https://github.com/daikin-br/pyiotdevice) (MIT). See
