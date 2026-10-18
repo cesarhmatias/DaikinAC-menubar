@@ -18,7 +18,7 @@ enum ACTab: String, CaseIterable, Identifiable {
         switch self {
         case .control: return 600
         case .energy: return 560
-        case .health: return 470
+        case .health: return 600
         case .schedules: return 300
         case .settings: return 560
         }
@@ -267,6 +267,9 @@ struct ACView: View {
         VStack(alignment: .leading, spacing: 12) {
             if let thing = store.selectedThing, let info = store.thingInfo {
                 let errors = info.errors(for: thing)
+                if let warning = DeviceHealth.subscriptionWarning(thing.subscription) {
+                    PanelCard { Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning).font(.system(size: 11, weight: .medium)) }
+                }
                 PanelCard {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(errors.isEmpty ? "No reported errors" : "\(errors.count) reported error\(errors.count == 1 ? "" : "s")",
@@ -275,7 +278,8 @@ struct ACView: View {
                         ForEach(errors) { item in
                             HStack(alignment: .top) {
                                 Text(item.code).font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                Text(item.description ?? "Description arrives with error translation.").font(.system(size: 11)).foregroundStyle(Theme.mutedInk)
+                                Text(item.description ?? store.errorTranslations[item.code].flatMap { $0.isEmpty ? nil : $0 } ?? "Translating…")
+                                    .font(.system(size: 11)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -283,16 +287,52 @@ struct ACView: View {
                 PanelCard {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Cloud subscription", systemImage: "cloud").fontWeight(.semibold)
-                        detailRow("Status", thing.subscription?.status ?? "Not reported")
+                        detailRow("Status", thing.subscription?.status?.capitalized ?? "Not reported")
                         detailRow("Expires", thing.subscription.map(expiryText) ?? "Not reported")
                     }
                 }
+                PanelCard {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label("Firmware", systemImage: "cpu").fontWeight(.semibold)
+                            Spacer()
+                            if store.checkingFirmware { ProgressView().controlSize(.mini) }
+                            else { Button("Check for update") { Task { await store.checkFirmware() } }.controlSize(.small).disabled(store.state?.fwVer == nil) }
+                        }
+                        detailRow("Installed", store.state?.fwVer ?? "Read the AC first")
+                        if let firmware = store.firmware { detailRow("Latest", firmware.summary) }
+                        if store.firmware?.status.uppercased() == "UPGRADE_AVAILABLE" {
+                            Text("Install updates from the Daikin Smart AC app. This app only checks.").font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+                        }
+                    }
+                }
+                PanelCard {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label("Diagnostics", systemImage: "stethoscope").fontWeight(.semibold)
+                            Spacer()
+                            if store.runningDiagnostics { ProgressView().controlSize(.mini) }
+                            else { Button("Run") { Task { await store.runDiagnostics() } }.controlSize(.small) }
+                        }
+                        if let report = store.diagnostics {
+                            if let mode = report.accessMode { detailRow("Access", mode) }
+                            ForEach(Array(report.results.enumerated()), id: \.offset) { _, result in detailRow(result.label, result.status.capitalized) }
+                            ForEach(report.statusTexts, id: \.self) { text in
+                                Text(text).font(.system(size: 10)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                            }
+                            if let code = report.deviceErrorCode { detailRow("Device error", code) }
+                        } else {
+                            Text("Runs Daikin's connectivity check. Diagnostic data is not shared.").font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+                        }
+                    }
+                }
             } else {
-                placeholder("Errors", "Reported error codes appear here with their Daikin description.", symbol: "exclamationmark.triangle")
-                placeholder("Cloud subscription", "Remote access status and expiry date. Local control does not depend on it.", symbol: "cloud")
+                placeholder("Sign in to see device health", "Errors, subscription, firmware and diagnostics appear after sign-in.", symbol: "stethoscope")
             }
-            placeholder("Firmware", "Installed version and whether an update is available. Read-only.", symbol: "cpu")
         }
+        .task(id: store.thingInfo) { await store.translateErrors() }
+        // Like the official firmware screen: fetched once when shown, never polled.
+        .task(id: store.state?.fwVer) { if store.firmware == nil, store.state?.fwVer != nil { await store.checkFirmware() } }
     }
 
     private func expiryText(_ subscription: CloudSubscription) -> String {
