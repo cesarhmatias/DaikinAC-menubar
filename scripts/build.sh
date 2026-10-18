@@ -18,11 +18,14 @@ swift build --package-path "$BUILD_ROOT" --scratch-path "$BUILD_ROOT/.build" -c 
   -Xcc "-ffile-prefix-map=$PROJECT_ROOT=." \
   -Xcc "-ffile-prefix-map=$BUILD_ROOT=."
 APP="$PROJECT_ROOT/dist/DaikinAC-menubar.app"
+VERSION="$(tr -d '[:space:]' < "$PROJECT_ROOT/VERSION")"
+BUILD_NUMBER="$(git -C "$PROJECT_ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD_ROOT/.build/release/DaikinACMenubar" "$APP/Contents/MacOS/DaikinACMenubar"
 strip -S "$APP/Contents/MacOS/DaikinACMenubar"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cp "$PROJECT_ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -30,8 +33,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>br.local.DaikinAC</string>
 <key>CFBundleName</key><string>DaikinAC-menubar</string>
 <key>CFBundleDisplayName</key><string>DaikinAC-menubar</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>0.1</string>
+<key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
