@@ -1,0 +1,232 @@
+import SwiftUI
+import AppKit
+
+enum ACTab: String, CaseIterable, Identifiable {
+    case control = "Control", energy = "Energy", health = "Health", schedules = "Schedules", settings = "Settings"
+    var id: String { rawValue }
+    var symbol: String {
+        switch self {
+        case .control: return "thermometer.medium"
+        case .energy: return "bolt"
+        case .health: return "stethoscope"
+        case .schedules: return "calendar.badge.clock"
+        case .settings: return "gearshape"
+        }
+    }
+    var preferredHeight: CGFloat {
+        switch self {
+        case .control: return 510
+        case .energy: return 350
+        case .health: return 450
+        case .schedules: return 300
+        case .settings: return 340
+        }
+    }
+    // `--tab <name>` opens the panel on that tab.
+    static var launchTab: ACTab? {
+        guard let index = CommandLine.arguments.firstIndex(of: "--tab"), CommandLine.arguments.count > index + 1 else { return nil }
+        return allCases.first { $0.rawValue.lowercased() == CommandLine.arguments[index + 1].lowercased() }
+    }
+}
+
+struct ACView: View {
+    @ObservedObject var store: ACStore
+    @State private var tab: ACTab
+    private var accent: Color { store.accent }
+    init(store: ACStore) {
+        self.store = store
+        _tab = State(initialValue: ACTab.launchTab ?? (store.signedIn ? .control : .settings))
+    }
+    var body: some View {
+        VStack(spacing: 0) {
+            header.padding(.top, 16).padding(.bottom, 16)
+            tabs.padding(.bottom, 14)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle(tab.rawValue.uppercased())
+                    tabContent
+                    feedback
+                }.padding(.bottom, 12)
+            }.scrollIndicators(.hidden)
+            footer.padding(.top, 10).padding(.bottom, 12)
+        }.padding(.horizontal, Theme.horizontalPadding).frame(width: Theme.panelWidth)
+            .background(Theme.background)
+            .foregroundStyle(Theme.ink).preferredColorScheme(.dark)
+            .font(.system(size: 12))
+            .tint(accent)
+            .animation(.easeOut(duration: 0.22), value: store.state?.mode)
+            .onChange(of: tab) { _, value in store.preferredPanelHeight = value.preferredHeight }
+            .onAppear { store.preferredPanelHeight = tab.preferredHeight }
+    }
+
+    @ViewBuilder private var tabContent: some View {
+        switch tab {
+        case .control: controlPanel
+        case .energy: energyPanel
+        case .health: healthPanel
+        case .schedules: schedulesPanel
+        case .settings: settingsPanel
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "air.conditioner.horizontal").font(.system(size: 15, weight: .medium)).foregroundStyle(accent)
+                .frame(width: 31, height: 31).background(Circle().fill(accent.opacity(0.16)))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(store.deviceName).font(.system(size: 17, weight: .semibold)).tracking(-0.3)
+                Text("Daikin · Smart AC").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.mutedInk)
+            }
+            Spacer()
+            Menu {
+                Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }
+            } label: { Image(systemName: "ellipsis").frame(width: 24, height: 30).foregroundStyle(Theme.mutedInk) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            Image(systemName: "power").font(.system(size: 17)).foregroundStyle(store.state?.isOn == true ? .white : Theme.mutedInk)
+                .frame(width: 34, height: 34).background(Circle().fill(Theme.buttonFill))
+                .help("AC power is available after sign-in")
+        }
+    }
+
+    private var tabs: some View {
+        HStack(spacing: 4) {
+            ForEach(ACTab.allCases) { item in
+                Button { tab = item } label: {
+                    Image(systemName: item.symbol).font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(tab == item ? accent : Theme.mutedInk)
+                        .frame(maxWidth: .infinity).frame(height: 35)
+                        .background(RoundedRectangle(cornerRadius: Theme.buttonRadius).fill(tab == item ? accent.opacity(0.2) : .clear))
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain).help(item.rawValue).accessibilityLabel(item.rawValue)
+            }
+        }.padding(4).background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.tabBarFill))
+            .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.tabBarBorder, lineWidth: Theme.borderWidth))
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        HStack {
+            Text(title).font(.system(size: 11, weight: .bold)).tracking(0.8).foregroundStyle(Theme.mutedInk)
+            Spacer()
+        }.padding(.horizontal, 1)
+    }
+
+    private var controlPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            PanelCard {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("TARGET").font(.system(size: 8, weight: .bold)).tracking(1.2).foregroundStyle(Theme.mutedInk)
+                        Text(store.state?.temperature.map { "\($0)°" } ?? "--")
+                            .font(.system(size: 44, weight: .medium, design: .rounded)).tracking(-1)
+                            .foregroundStyle(store.state?.temperature == nil ? Theme.faintInk : accent)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 6) {
+                        reading("Room", store.state?.sensors?.roomTemp)
+                        reading("Outdoor", store.state?.sensors?.outTemp)
+                    }
+                }
+            }
+            PanelCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Mode").fontWeight(.semibold)
+                    HStack(spacing: 6) {
+                        ForEach(ACMode.allCases) { mode in
+                            VStack(spacing: 5) {
+                                Image(systemName: mode.symbol).font(.system(size: 14))
+                                Text(mode.title).font(.system(size: 9, weight: .medium))
+                            }.frame(maxWidth: .infinity).frame(height: 46)
+                                .foregroundStyle(Theme.accent(for: mode))
+                                .background(RoundedRectangle(cornerRadius: Theme.buttonRadius, style: .continuous).fill(Theme.accent(for: mode).opacity(0.1)))
+                        }
+                    }
+                }
+            }
+            placeholder("Controls arrive after sign-in", "The app reads your AC state first. Commands are only sent after a successful read.", symbol: "lock")
+        }
+    }
+
+    private var energyPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                tile("TODAY", "— kWh"); tile("THIS WEEK", "— kWh"); tile("THIS MONTH", "— kWh")
+            }
+            placeholder("No readings yet", "Energy totals come from the cloud meter, synced at most every 6 hours.", symbol: "bolt")
+        }
+    }
+
+    private var healthPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            placeholder("Errors", "Reported error codes appear here with their Daikin description.", symbol: "exclamationmark.triangle")
+            placeholder("Cloud subscription", "Remote access status and expiry date. Local control does not depend on it.", symbol: "cloud")
+            placeholder("Firmware", "Installed version and whether an update is available. Read-only.", symbol: "cpu")
+        }
+    }
+
+    private var schedulesPanel: some View {
+        placeholder("Comfort profiles", "Your schedules and their run history. They are shown read-only first.", symbol: "calendar")
+    }
+
+    private var settingsPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            PanelCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Daikin account", systemImage: "person.crop.circle").fontWeight(.semibold)
+                    Text("Sign in with your own Daikin Smart AC account. Your password and tokens are kept in the macOS Keychain.")
+                        .font(.system(size: 11)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                    Text("Sign-in is not available in this build yet.").font(.system(size: 10)).foregroundStyle(Theme.faintInk)
+                }
+            }
+            Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }.buttonStyle(.link).font(.system(size: 11))
+        }
+    }
+
+    private func reading(_ title: String, _ value: Double?) -> some View {
+        HStack(spacing: 6) {
+            Text(title).font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+            Text(value.map { String(format: "%.1f°", $0) } ?? "—").font(.system(size: 12, weight: .semibold)).monospacedDigit()
+        }
+    }
+
+    private func tile(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 8, weight: .bold)).tracking(1).foregroundStyle(Theme.mutedInk)
+            Text(value).font(.system(size: 15, weight: .semibold, design: .rounded)).monospacedDigit()
+        }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).fill(accent.opacity(0.08)))
+    }
+
+    private func placeholder(_ title: String, _ detail: String, symbol: String) -> some View {
+        PanelCard {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(accent).frame(width: 20)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).fontWeight(.semibold)
+                    Text(detail).font(.system(size: 11)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var feedback: some View {
+        if let error = store.error {
+            PanelCard {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.warning)
+                    Text(error).font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button { store.error = nil } label: { Image(systemName: "xmark").font(.system(size: 10)) }.buttonStyle(.plain).help("Dismiss message")
+                }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 6) {
+            Circle().fill(store.signedIn ? Theme.online : Theme.mutedInk).frame(width: 5, height: 5)
+            Text(store.status).font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+            Spacer()
+            Text(store.state?.fwVer.map { "FW \($0)" } ?? "").font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(Theme.faintInk)
+        }
+    }
+}
