@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Charts
 
 enum ACTab: String, CaseIterable, Identifiable {
     case control = "Control", energy = "Energy", health = "Health", schedules = "Schedules", settings = "Settings"
@@ -16,7 +17,7 @@ enum ACTab: String, CaseIterable, Identifiable {
     var preferredHeight: CGFloat {
         switch self {
         case .control: return 600
-        case .energy: return 350
+        case .energy: return 560
         case .health: return 470
         case .schedules: return 300
         case .settings: return 560
@@ -57,8 +58,16 @@ struct ACView: View {
             .font(.system(size: 12))
             .tint(accent)
             .animation(.easeOut(duration: 0.22), value: store.state?.mode)
-            .onChange(of: tab) { _, value in store.preferredPanelHeight = value.preferredHeight }
-            .onAppear { store.preferredPanelHeight = tab.preferredHeight }
+            .onChange(of: tab) { _, value in
+                store.preferredPanelHeight = value.preferredHeight
+                if value == .energy { Task { await store.loadEnergy() } }
+            }
+            .onChange(of: store.thingInfo) { _, _ in if tab == .energy { Task { await store.loadEnergy() } } }
+            .onChange(of: store.selectedThingID) { _, _ in if tab == .energy { Task { await store.loadEnergy() } } }
+            .onAppear {
+                store.preferredPanelHeight = tab.preferredHeight
+                if tab == .energy { Task { await store.loadEnergy() } }
+            }
     }
 
     @ViewBuilder private var tabContent: some View {
@@ -207,11 +216,52 @@ struct ACView: View {
     private var energyPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                tile("TODAY", "— kWh"); tile("THIS WEEK", "— kWh"); tile("THIS MONTH", "— kWh")
+                tile("TODAY", kwh(store.energy?.today))
+                tile(store.energy.map { "WEEK \($0.weekNumber)" } ?? "THIS WEEK", kwh(store.energy?.week))
+                tile("THIS MONTH", kwh(store.energy?.month))
             }
-            placeholder("No readings yet", "Energy totals come from the cloud meter, synced at most every 6 hours.", symbol: "bolt")
+            if let energy = store.energy {
+                PanelCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Daily use this month").fontWeight(.semibold)
+                        if energy.monthDays.isEmpty {
+                            Text("No readings this month yet.").font(.system(size: 11)).foregroundStyle(Theme.mutedInk)
+                        } else {
+                            Chart(energy.monthDays, id: \.day) { entry in
+                                BarMark(x: .value("Day", Int(entry.day.suffix(2)) ?? 0), y: .value("kWh", entry.kwh))
+                                    .foregroundStyle(accent.gradient).cornerRadius(2)
+                            }
+                            .chartXScale(domain: 0...32)
+                            .chartXAxis { AxisMarks(values: [1, 8, 15, 22, 29]) { AxisValueLabel().font(.system(size: 8)) } }
+                            .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                                AxisGridLine().foregroundStyle(Theme.cardBorder); AxisValueLabel().font(.system(size: 8)) } }
+                            .frame(height: 110)
+                        }
+                        HStack(spacing: 6) {
+                            ForEach(1...5, id: \.self) { week in
+                                VStack(spacing: 2) {
+                                    Text("W\(week)").font(.system(size: 8, weight: .bold)).foregroundStyle(week == energy.weekNumber ? accent : Theme.mutedInk)
+                                    Text(String(format: "%.1f", energy.weeks[week] ?? 0)).font(.system(size: 10, weight: .medium)).monospacedDigit()
+                                }.frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+                }
+            } else if !store.syncingEnergy {
+                placeholder("No readings yet", "Energy totals come from the cloud meter, synced at most every 6 hours.", symbol: "bolt")
+            }
+            HStack(spacing: 6) {
+                if store.syncingEnergy { ProgressView().controlSize(.mini); Text("Syncing energy data…") }
+                else if let cache = store.energyCache, let last = cache.lastSync {
+                    Text("Synced \(last.formatted(date: .abbreviated, time: .shortened)) · next after \((cache.nextSync() ?? last).formatted(date: .omitted, time: .shortened))")
+                }
+            }.font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+            Text("Usage is an estimate calculated by the Daikin system and may differ from your actual consumption.")
+                .font(.system(size: 9)).foregroundStyle(Theme.faintInk).fixedSize(horizontal: false, vertical: true)
         }
     }
+
+    private func kwh(_ value: Double?) -> String { value.map { String(format: "%.1f kWh", $0) } ?? "— kWh" }
 
     private var healthPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
