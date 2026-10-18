@@ -35,7 +35,11 @@ enum FeatureChecks {
         try testThingInfoKeepsErrorsAndSubscription()
         try testOnlyReadOnlyManageThingRequests()
         try testResponseShapesHideValues()
-        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes.")
+        try testSigV4MatchesBotocore()
+        try testMQTTPackets()
+        try testShadowDocumentAndCommandBody()
+        try testCommandRules()
+        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules and confirmation matching.")
     }
 
     // A syntactically valid, unsigned JWT built at runtime so no token-shaped literal is tracked.
@@ -312,5 +316,90 @@ enum FeatureChecks {
         try rejects("B = 0") { _ = try srp.passwordAuthenticationKey(userID: userID, password: password, serverB: 0, saltHex: salt) }
         try rejects("B = N") { _ = try srp.passwordAuthenticationKey(userID: userID, password: password, serverB: N, saltHex: salt) }
         try rejects("incomplete challenge") { _ = try srp.challengeResponses(["SALT": salt], password: password, date: date) }
+    }
+
+    // Reference URL computed offline with botocore 1.40.0 SigV4QueryAuth (token appended after signing,
+    // as AWS IoT requires); the keys are AWS's documentation examples.
+    static func testSigV4MatchesBotocore() throws {
+        let credentials = AWSCredentials(accessKeyID: "AKIDEXAMPLE", secretKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                                         sessionToken: "session/token+example=", expiration: .distantFuture)
+        let date = DateComponents(calendar: Calendar(identifier: .gregorian), timeZone: TimeZone(identifier: "UTC"), year: 2026, month: 10, day: 19, hour: 12).date!
+        let url = SigV4.presignedIoTURL(host: ShadowClient.host, credentials: credentials, region: "us-east-1", date: date)
+        try equal(url.absoluteString, "wss://a2zl28lcjjddi3-ats.iot.us-east-1.amazonaws.com/mqtt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIDEXAMPLE%2F20261019%2Fus-east-1%2Fiotdevicegateway%2Faws4_request&X-Amz-Date=20261019T120000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=10d71011b7fe90f8cb85cdee2c9e07518618e6c868b2a05fa7689357c76fa627&X-Amz-Security-Token=session%2Ftoken%2Bexample%3D", "presigned IoT WebSocket URL")
+    }
+
+    static func testMQTTPackets() throws {
+        let connect = MQTT.connect(clientID: "abc", keepAlive: 60)
+        try equal([UInt8](connect), [0x10, 15, 0, 4, 0x4D, 0x51, 0x54, 0x54, 4, 0x02, 0, 60, 0, 3, 0x61, 0x62, 0x63], "CONNECT 3.1.1, clean session, keep-alive 60")
+        let subscribe = MQTT.subscribe(packetID: 1, topics: ["a/b"])
+        try equal([UInt8](subscribe), [0x82, 8, 0, 1, 0, 3, 0x61, 0x2F, 0x62, 0], "SUBSCRIBE QoS 0")
+        try equal([UInt8](MQTT.publish(topic: "t", payload: Data("{}".utf8))), [0x30, 5, 0, 1, 0x74, 0x7B, 0x7D], "PUBLISH QoS 0")
+        try equal([UInt8](MQTT.pingreq), [0xC0, 0], "PINGREQ"); try equal([UInt8](MQTT.disconnect), [0xE0, 0], "DISCONNECT")
+        try equal([UInt8](MQTT.frame(.publish, 0, Data(count: 200)).prefix(3)), [0x30, 0xC8, 0x01], "two-byte remaining length")
+
+        // Packets split across and packed into WebSocket frames.
+        var buffer = Data([0x20, 0x02, 0x00])
+        try truth(try MQTT.next(&buffer) == nil, "incomplete packet waits")
+        buffer += Data([0x00, 0x90, 0x03, 0x00, 0x01, 0x00])
+        try equal(try MQTT.next(&buffer), MQTT.Packet(type: .connack, flags: 0, body: Data([0, 0])), "CONNACK")
+        try equal(try MQTT.next(&buffer), MQTT.Packet(type: .suback, flags: 0, body: Data([0, 1, 0])), "SUBACK")
+        try truth(buffer.isEmpty, "buffer drained")
+
+        let incoming = MQTT.Packet(type: .publish, flags: 0x02, body: Data([0, 3, 0x61, 0x2F, 0x62, 0x12, 0x34, 0x7B, 0x7D]))
+        let contents = MQTT.publishContents(incoming)
+        try equal(contents?.topic, "a/b", "incoming topic"); try equal(contents?.payload, Data("{}".utf8), "QoS 1 payload skips the packet id")
+        try equal(ShadowClient.topic("thing-a", "get/accepted"), "$aws/things/thing-a/shadow/get/accepted", "shadow topic")
+    }
+
+    static func testShadowDocumentAndCommandBody() throws {
+        let fixture = """
+        {"state":{"reported":{"port1":{"power":1,"mode":4,"temperature":21,"fan":5,"sensors":{"room_temp":19.5},"fw_ver":"2.0.1"},"wifi":{"rssi":-60}},
+                  "desired":{"port1":{"temperature":22},"src":5}},"metadata":{},"version":42,"timestamp":1760000000}
+        """
+        let document = ShadowClient.parse(try JSONSerialization.jsonObject(with: Data(fixture.utf8)) as! [String: Any])
+        try equal(document.reported?.acMode, .heat, "reported mode"); try equal(document.reported?.temperature, 21, "reported temperature")
+        try equal(document.reported?.sensors?.roomTemp, 19.5, "room_temp"); try equal(document.reported?.fwVer, "2.0.1", "fw_ver")
+        try equal(document.desired?.temperature, 22, "pending desired"); try equal(document.version, 42, "version")
+        try equal(document.timestamp, Date(timeIntervalSince1970: 1_760_000_000), "timestamp")
+        let cleared = ShadowClient.parse(["state": ["reported": ["port1": ["power": 0]], "desired": NSNull()]])
+        try truth(cleared.desired == nil && cleared.reported?.isOn == false, "desired cleared means the command was applied")
+        try truth(ShadowClient.parse([:]).reported == nil, "empty shadow")
+
+        try equal(String(decoding: try ShadowClient.commandBody(.setting(temperature: 23)), as: UTF8.self),
+                  #"{"state":{"desired":{"port1":{"temperature":23},"src":5}}}"#, "command carries only changed keys and src 5")
+        try equal(String(decoding: try ShadowClient.commandBody(.setting(mode: .dry)), as: UTF8.self),
+                  #"{"state":{"desired":{"port1":{"fan":17,"mode":2,"power":1},"src":5}}}"#, "DRY command")
+
+        let identity = try IdentityPool.parseCredentials(["IdentityId": "x", "Credentials": ["AccessKeyId": "AK", "SecretKey": "SK", "SessionToken": "ST", "Expiration": 1_760_003_600]])
+        try equal(identity, AWSCredentials(accessKeyID: "AK", secretKey: "SK", sessionToken: "ST", expiration: Date(timeIntervalSince1970: 1_760_003_600)), "Identity Pool credentials")
+        try rejects("missing credentials") { _ = try IdentityPool.parseCredentials(["IdentityId": "x"]) }
+        let getID = try IdentityPool.request("GetId", ["IdentityPoolId": CognitoConfig.identityPoolID])
+        try equal(getID.value(forHTTPHeaderField: "X-Amz-Target"), "AWSCognitoIdentityService.GetId", "GetId target")
+        try equal(getID.url?.host, "cognito-identity.us-east-1.amazonaws.com", "Identity host")
+    }
+
+    static func testCommandRules() throws {
+        try equal(Sensors(roomTemp: 24, outTemp: 255).outdoor, nil, "out_temp 255 means no reading")
+        try equal(Sensors(roomTemp: 24, outTemp: 255).room, 24, "room_temp kept")
+        let live = ShadowClient.parse(["state": ["reported": ["ac_unit_type": "COOL_ONLY", "port1": ["power": 0, "mode": 3, "temperature": 26, "fan": 17]]]])
+        try equal(live.unitType, "COOL_ONLY", "ac_unit_type beside port1")
+        guard let state = live.reported else { throw Failure(detail: "no reported state") }
+        try equal(state.steppedTemperature(by: -1), 25, "one step down"); try equal(state.steppedTemperature(by: 1), 27, "one step up")
+        var top = state; top.temperature = 32
+        try equal(top.steppedTemperature(by: 1), nil, "COOL stops at 32")
+        var heat = state; heat.mode = 4; heat.temperature = 30
+        try equal(heat.steppedTemperature(by: 1), nil, "HEAT stops at 30")
+        var dry = state; dry.mode = 2
+        try truth(!dry.canChangeTemperature && !dry.canChangeFan, "DRY fixes target and fan")
+        var boost = state; boost.powerchill = 1
+        try truth(!boost.canChangeTemperature && !boost.canChangeFan, "powerful mode fixes target and fan")
+        try truth(state.canChangeTemperature && state.canChangeFan, "COOL allows both")
+
+        var after = state; after.temperature = 25
+        try truth(after.satisfies(.setting(temperature: 25)) && !state.satisfies(.setting(temperature: 25)), "confirmation compares changed keys")
+        var on = state; on.power = 1
+        try truth(on.satisfies(.setting(mode: .cool)) && !state.satisfies(.setting(mode: .cool)), "mode command also needs power on")
+        let update = MQTT.publish(topic: ShadowClient.topic("thing-a", "update"), payload: try ShadowClient.commandBody(.setting(temperature: 25)))
+        try truth(MQTT.publishContents(MQTT.Packet(type: .publish, flags: 0, body: update.dropFirst(2)))?.topic == "$aws/things/thing-a/shadow/update", "command topic")
     }
 }
