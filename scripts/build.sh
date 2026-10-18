@@ -41,5 +41,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
 PLIST
-codesign --force --deep --sign - --identifier br.local.DaikinAC "$APP"
+# A local self-signed identity keeps the code requirement stable across builds, so Keychain
+# access granted once ("Always Allow") survives rebuilds. Without it, sign ad hoc.
+SIGNING_IDENTITY="DaikinAC-menubar Local Signing"
+if security find-identity -p codesigning 2>/dev/null | grep -q "\"$SIGNING_IDENTITY\""; then
+  codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier br.local.DaikinAC "$APP"
+else
+  codesign --force --deep --sign - --identifier br.local.DaikinAC "$APP"
+fi
 printf 'App created at %s\n' "$APP"
