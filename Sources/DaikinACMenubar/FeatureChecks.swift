@@ -1,4 +1,6 @@
 import Foundation
+import CryptoKit
+import BigInt
 
 // Offline checks run by `--self-check`. Nothing here touches the network, the
 // Keychain or an AC.
@@ -19,6 +21,7 @@ enum FeatureChecks {
     }
 
     static func run() async throws {
+        ResponseShapes.enabled = false
         try testCRC16Genibus()
         try testTemperatureClamp()
         try testPort1DecodeAndEncode()
@@ -27,7 +30,110 @@ enum FeatureChecks {
         try testErrorTranslationRequest()
         try testWeekdaysSundayToSaturday()
         try testAmplifySignInHasNoSecretHash()
-        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_PASSWORD_AUTH without SECRET_HASH.")
+        try testSRPMatchesPycognito()
+        try testCognitoResponses()
+        try testThingInfoKeepsErrorsAndSubscription()
+        try testOnlyReadOnlyManageThingRequests()
+        try testResponseShapesHideValues()
+        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes.")
+    }
+
+    // A syntactically valid, unsigned JWT built at runtime so no token-shaped literal is tracked.
+    static func fakeJWT(_ claims: [String: Any]) -> String {
+        func part(_ object: Any) -> String {
+            let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+            return data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        }
+        return part(["alg": "none"]) + "." + part(claims) + ".signature"
+    }
+
+    static func testCognitoResponses() throws {
+        let mail = "someone" + "@" + "example.com"
+        let id = fakeJWT(["sub": "1111-2222", "email": mail, "exp": 1])
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let ok = #"{"AuthenticationResult":{"IdToken":"\#(id)","AccessToken":"access","RefreshToken":"refresh","ExpiresIn":3600,"TokenType":"Bearer"},"ChallengeParameters":{}}"#
+        let tokens = try CognitoAuth.parse(Data(ok.utf8), status: 200, previousRefreshToken: nil, now: now)
+        try equal(tokens.sub, "1111-2222", "sub claim")
+        try equal(tokens.email, mail, "email claim")
+        try equal(tokens.expiresAt, now.addingTimeInterval(3600), "expiry")
+        try truth(!tokens.needsRefresh(now: now) && tokens.needsRefresh(now: now.addingTimeInterval(3400)), "refresh 5 min before expiry")
+
+        let refreshed = #"{"AuthenticationResult":{"IdToken":"\#(id)","AccessToken":"access2","ExpiresIn":3600}}"#
+        try equal(try CognitoAuth.parse(Data(refreshed.utf8), status: 200, previousRefreshToken: "refresh", now: now).refreshToken, "refresh", "refresh keeps the refresh token")
+
+        let disabled = #"{"__type":"InvalidParameterException","message":"USER_PASSWORD_AUTH flow not enabled for this client"}"#
+        do { _ = try CognitoAuth.parse(Data(disabled.utf8), status: 400, previousRefreshToken: nil); throw Failure(detail: "error accepted") }
+        catch let failure as CognitoFailure {
+            try equal(failure, CognitoFailure(type: "InvalidParameterException", message: "USER_PASSWORD_AUTH flow not enabled for this client", httpStatus: 400), "flow disabled error")
+        }
+        let wrong = #"{"__type":"com.amazonaws.cognito#NotAuthorizedException","message":"Incorrect username or password."}"#
+        do { _ = try CognitoAuth.parse(Data(wrong.utf8), status: 400, previousRefreshToken: nil); throw Failure(detail: "error accepted") }
+        catch let failure as CognitoFailure { try equal(failure.type, "NotAuthorizedException", "namespaced error type") }
+        try rejects("challenge without tokens") { _ = try CognitoAuth.parse(Data(#"{"ChallengeName":"NEW_PASSWORD_REQUIRED","Session":"s"}"#.utf8), status: 200, previousRefreshToken: nil) }
+        try rejects("HTTP 500 without JSON") { _ = try CognitoAuth.parse(Data("oops".utf8), status: 500, previousRefreshToken: nil) }
+        try truth(JWT.claims("not.a-jwt") == nil && JWT.claims("abc") == nil, "malformed JWT")
+    }
+
+    static func testThingInfoKeepsErrorsAndSubscription() throws {
+        let key = "c2Vj" + "cmV0"
+        let fixture = """
+        {"status":0,"json_response":{
+          "things":[
+            {"thing_id":"thing-a","is_device_authorized":1,"model_name":"Split Inverter","model_desc":"desc",
+             "thing_metadata":{"thing_apn":"DAIKIN:AABBCC","thing_secret_key":"\(key)","thing_name":"Bedroom"},
+             "cloud_subscription":{"status":"ACTIVE","expiry_date":"2027-03-01"}},
+            {"thing_id":"thing-b","is_device_authorized":"0","model_desc":"Living room unit"},
+            {"model_name":"no id, skipped"}],
+          "error_data":[{"error_trx_id":123,"thing_id":"thing-a","error_code":"A5","manufacturer_error_code":"A5"},
+                        {"error_code":""}]}}
+        """
+        let json = try JSONSerialization.jsonObject(with: Data(fixture.utf8)) as! [String: Any]
+        let info = DaikinAPI.parseThingInfo(try APIStatus.manageThing(json))
+        try equal(info.things.map(\.id), ["thing-a", "thing-b"], "things with an id")
+        let a = info.things[0], b = info.things[1]
+        try equal(a.name, "Bedroom", "thing name from metadata")
+        try equal(b.name, "Living room unit", "name falls back to model_desc")
+        try equal(a.isAuthorized, true, "authorized as int"); try equal(b.isAuthorized, false, "authorized as string")
+        try equal(a.apn, "DAIKIN:AABBCC", "apn"); try equal(a.secretKey, "c2VjcmV0", "secret key kept in memory")
+        try equal(a.subscription, CloudSubscription(status: "ACTIVE", expiryDate: "2027-03-01"), "cloud_subscription")
+        try truth(a.subscription?.expiry != nil && b.subscription == nil, "expiry date parsed")
+        try equal(info.errors.count, 1, "empty error codes dropped")
+        try equal(info.errors[0], ThingError(transactionID: "123", thingID: "thing-a", code: "A5", description: nil, manufacturerCode: "A5"), "error_data")
+        try equal(info.errors(for: b).count, 0, "errors are per device")
+        for text in ["1760000000", "1760000000000", "2027-03-01T00:00:00Z", "2027-03-01 10:00:00", "01/03/2027"] {
+            try truth(Lenient.date(text) != nil, "date format \(text)")
+        }
+    }
+
+    static func testOnlyReadOnlyManageThingRequests() throws {
+        let allowed = Set(ManageThingRequest.allCases.map(\.rawValue))
+        try equal(allowed, ["GET_THING_INFO", "GET_THING_ERROR_TRANSLATION"], "managething request types")
+        for forbidden in ["ADD_THING", "UPDATE_THING", "DELETE_THING", "INITIATE_FIRMWARE_UPGRADE", "DELETE_USER_ACCOUNT"] {
+            try truth(ManageThingRequest(rawValue: forbidden) == nil, "\(forbidden) cannot be built")
+        }
+        let body = DaikinAPI.manageThingBody(.getThingInfo, sub: "sub", accessToken: "access")
+        try equal(body["request_type"] as? String, "GET_THING_INFO", "request_type")
+        try equal(body["user_name"] as? String, "sub", "user_name is the sub")
+        try truth(body["json_request"] is [String: Any], "json_request object")
+    }
+
+    static func testResponseShapesHideValues() throws {
+        let mail = "owner" + "@" + "gmail.com"
+        let key = "c2VjcmV0" + "S2V5"
+        let input: [String: Any] = [
+            "status": 0, "message": "Unknown user \(mail)",
+            "json_response": ["things": [["thing_id": "Ab12-xyz", "thing_metadata": ["thing_secret_key": key], "latitude": -23.5,
+                                          "is_device_authorized": 1, "cloud_subscription": ["status": "ACTIVE", "expiry_date": "2027-03-01"]]]],
+        ]
+        let masked = ResponseShapes.mask(input)
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: masked, options: [.sortedKeys]), as: UTF8.self)
+        for secret in ["Ab12-xyz", "c2VjcmV0S2V5", "-23.5", "2027-03-01", mail] {
+            try truth(!text.contains(secret), "masked shape hides a value")
+        }
+        for kept in ["\"Aa99-aaa\"", "\"a9AaaaA9A9A9\"", "<float>", "9999-99-99", "\"ACTIVE\"", "Unknown user <redacted>", "\"is_device_authorized\":1"] {
+            try truth(text.contains(kept), "masked shape keeps \(kept)")
+        }
+        try equal(ResponseShapes.pattern(String(repeating: "x", count: 60)), String(repeating: "a", count: 48) + "…(60)", "long strings truncated")
     }
 
     static func testCRC16Genibus() throws {
@@ -153,18 +259,58 @@ enum FeatureChecks {
     }
 
     static func testAmplifySignInHasNoSecretHash() throws {
-        let request = try CognitoRequest.initiateAuth(username: "someone", password: "not-a-real-password")
+        let srp = try CognitoSRP(a: BigUInt(12345))
+        let request = try CognitoRequest.initiateSRP(username: "someone", srpA: srp.srpA)
         try equal(request.url?.host, "cognito-idp.us-east-1.amazonaws.com", "Cognito host")
         try equal(request.value(forHTTPHeaderField: "X-Amz-Target"), "AWSCognitoIdentityProviderService.InitiateAuth", "target")
         guard let data = request.httpBody, let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let parameters = body["AuthParameters"] as? [String: String] else { throw Failure(detail: "InitiateAuth body is not JSON") }
         try equal(body["ClientId"] as? String, "2tl54vtfepvo3nu23um3c6rjs9", "Amplify client")
-        try equal(body["AuthFlow"] as? String, "USER_PASSWORD_AUTH", "auth flow")
-        try equal(Set(parameters.keys), ["USERNAME", "PASSWORD"], "only USERNAME and PASSWORD")
-        try truth(!String(decoding: data, as: UTF8.self).contains("SECRET_HASH"), "no SECRET_HASH anywhere in the body")
+        try equal(body["AuthFlow"] as? String, "USER_SRP_AUTH", "auth flow")
+        try equal(Set(parameters.keys), ["USERNAME", "SRP_A"], "only USERNAME and SRP_A")
+        try truth(!String(decoding: data, as: UTF8.self).contains("SECRET_HASH"), "no SECRET_HASH in InitiateAuth")
+
+        let challenge = try CognitoRequest.respondToPasswordVerifier(["USERNAME": "u", "TIMESTAMP": "t", "PASSWORD_CLAIM_SECRET_BLOCK": "b", "PASSWORD_CLAIM_SIGNATURE": "s"], session: nil)
+        let challengeBody = String(decoding: challenge.httpBody ?? Data(), as: UTF8.self)
+        try equal(challenge.value(forHTTPHeaderField: "X-Amz-Target"), "AWSCognitoIdentityProviderService.RespondToAuthChallenge", "challenge target")
+        try truth(challengeBody.contains("PASSWORD_VERIFIER") && !challengeBody.contains("SECRET_HASH") && !challengeBody.contains("Session"), "challenge has no SECRET_HASH")
 
         let refresh = try CognitoRequest.refresh(refreshToken: "refresh")
         let refreshBody = String(decoding: refresh.httpBody ?? Data(), as: UTF8.self)
         try truth(refreshBody.contains("REFRESH_TOKEN_AUTH") && !refreshBody.contains("SECRET_HASH"), "refresh has no SECRET_HASH")
+    }
+
+    // Reference values computed offline with pycognito 2024.5.1 (aws_srp.py) from the same inputs.
+    static func testSRPMatchesPycognito() throws {
+        func chain(_ seed: String, _ count: Int) -> BigUInt {
+            var bytes = Data(), block = Data(seed.utf8)
+            while bytes.count < count { block = Data(SHA256.hash(data: block)); bytes += block }
+            return BigUInt(bytes.prefix(count))
+        }
+        func digest(_ text: String) -> String { Hex.string(Data(SHA256.hash(data: Data(text.utf8)))) }
+        try equal(Hex.pad("abc"), "0abc", "pad odd length"); try equal(Hex.pad("8f"), "008f", "pad high nibble"); try equal(Hex.pad("7f"), "7f", "no pad")
+        try equal(Hex.string(CognitoSRP.k), "538282c4354742d7cbbde2359fcf67f9f5b3a6b08791e5011b43b8a5b66d9ee6", "k")
+
+        let N = CognitoSRP.N, a = chain("daikin-srp-a", 128) % N, b = chain("daikin-srp-b", 128) % N
+        let B = (CognitoSRP.k * CognitoSRP.g.power(BigUInt(12345), modulus: N) + CognitoSRP.g.power(b, modulus: N)) % N
+        try equal(digest(Hex.string(a)), "7178f3d5055f3cd921ca9df038989112a87ac72370260a748243b32937b650f9", "a")
+        try equal(digest(Hex.string(B)), "4cb3f40d90c82e6c8efa7181dbc76715082d14e82663f52edad9af4033ebb991", "B")
+        let srp = try CognitoSRP(a: a)
+        try equal(srp.srpA.count, 768, "A is 3072 bits")
+        try equal(digest(srp.srpA), "69d58d8599c2ad5879ba3904dd611c1a3b62001de052839af0860d92191d75ce", "A = g^a mod N")
+
+        let userID = "11111111-2222-3333-4444-555555555555", password = "Correct horse battery staple!", salt = "f3a1c2b4d5e6071829304a5b6c7d8e9f"
+        let key = try srp.passwordAuthenticationKey(userID: userID, password: password, serverB: B, saltHex: salt)
+        try equal(Hex.string(key), "3ef5df62544d6345886b47ae4b90c1e0", "HKDF password authentication key")
+
+        let date = DateComponents(calendar: Calendar(identifier: .gregorian), timeZone: TimeZone(identifier: "UTC"), year: 2026, month: 10, day: 9, hour: 5, minute: 7, second: 3).date!
+        try equal(CognitoSRP.timestamp(date), "Fri Oct 9 05:07:03 UTC 2026", "timestamp without a leading zero")
+        let block = Data(0..<64).base64EncodedString()
+        let responses = try srp.challengeResponses(["USER_ID_FOR_SRP": userID, "USERNAME": userID, "SALT": salt, "SRP_B": Hex.string(B), "SECRET_BLOCK": block], password: password, date: date)
+        try equal(responses, ["TIMESTAMP": "Fri Oct 9 05:07:03 UTC 2026", "USERNAME": userID, "PASSWORD_CLAIM_SECRET_BLOCK": block,
+                              "PASSWORD_CLAIM_SIGNATURE": "X0UBScmcXmCPtE714JURS99BA9WLJeVToQVH+Lsr2fg="], "PASSWORD_VERIFIER responses")
+        try rejects("B = 0") { _ = try srp.passwordAuthenticationKey(userID: userID, password: password, serverB: 0, saltHex: salt) }
+        try rejects("B = N") { _ = try srp.passwordAuthenticationKey(userID: userID, password: password, serverB: N, saltHex: salt) }
+        try rejects("incomplete challenge") { _ = try srp.challengeResponses(["SALT": salt], password: password, date: date) }
     }
 }
