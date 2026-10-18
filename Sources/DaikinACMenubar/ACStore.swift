@@ -252,12 +252,20 @@ struct StoredSession: Codable {
         }
     }
 
+    private var localFailures = 0
+
+    // One failed poll is tolerated (Wi-Fi blips, sleep); two in a row fall back to the cloud.
     private func pollLocal() async {
         guard let endpoint = localEndpoint, let key = localKey, sendingCommand == nil else { return }
         do {
             applyLocal(try await LocalChannel.status(at: endpoint, key: key))
+            localFailures = 0
         } catch {
+            localFailures += 1
+            guard localFailures >= 2 else { return }
+            localFailures = 0
             stopLocal()
+            localStatus = "Lost the AC on the local network\(signedIn ? "; using the cloud" : ""). Reopen the panel to try again."
             self.error = "Lost the AC on the local network\(signedIn ? "; using the cloud" : ""). (\(error.localizedDescription))"
             if signedIn { await connectShadow() }
         }
