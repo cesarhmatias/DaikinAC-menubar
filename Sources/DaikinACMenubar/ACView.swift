@@ -15,11 +15,11 @@ enum ACTab: String, CaseIterable, Identifiable {
     }
     var preferredHeight: CGFloat {
         switch self {
-        case .control: return 510
+        case .control: return 560
         case .energy: return 350
         case .health: return 470
         case .schedules: return 300
-        case .settings: return 470
+        case .settings: return 560
         }
     }
     // `--tab <name>` opens the panel on that tab.
@@ -84,9 +84,11 @@ struct ACView: View {
                 Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }
             } label: { Image(systemName: "ellipsis").frame(width: 24, height: 30).foregroundStyle(Theme.mutedInk) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            Image(systemName: "power").font(.system(size: 17)).foregroundStyle(store.state?.isOn == true ? .white : Theme.mutedInk)
-                .frame(width: 34, height: 34).background(Circle().fill(Theme.buttonFill))
-                .help("AC power is available after sign-in")
+            Button { if let state = store.state { command(.setting(power: !state.isOn)) } } label: {
+                Image(systemName: "power").font(.system(size: 17)).foregroundStyle(store.state?.isOn == true ? accent : Theme.mutedInk)
+                    .frame(width: 34, height: 34).background(Circle().fill(store.state?.isOn == true ? accent.opacity(0.18) : Theme.buttonFill))
+            }.buttonStyle(.plain).disabled(!store.canSendCommands)
+                .help(store.commandsAllowed ? (store.state?.isOn == true ? "Turn the AC off" : "Turn the AC on") : "Allow commands in Settings first")
         }
     }
 
@@ -117,15 +119,22 @@ struct ACView: View {
             PanelCard {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("TARGET").font(.system(size: 8, weight: .bold)).tracking(1.2).foregroundStyle(Theme.mutedInk)
+                        Text(store.state.map { $0.isOn ? "TARGET" : "OFF · TARGET" } ?? "TARGET")
+                            .font(.system(size: 8, weight: .bold)).tracking(1.2).foregroundStyle(Theme.mutedInk)
                         Text(store.state?.temperature.map { "\($0)°" } ?? "--")
                             .font(.system(size: 44, weight: .medium, design: .rounded)).tracking(-1)
                             .foregroundStyle(store.state?.temperature == nil ? Theme.faintInk : accent)
                     }
+                    if let state = store.state, state.canChangeTemperature {
+                        VStack(spacing: 6) {
+                            stepButton("plus", state.steppedTemperature(by: 1))
+                            stepButton("minus", state.steppedTemperature(by: -1))
+                        }.padding(.leading, 4)
+                    }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 6) {
-                        reading("Room", store.state?.sensors?.roomTemp)
-                        reading("Outdoor", store.state?.sensors?.outTemp)
+                        reading("Room", store.state?.sensors?.room)
+                        reading("Outdoor", store.state?.sensors?.outdoor)
                     }
                 }
             }
@@ -133,18 +142,60 @@ struct ACView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Mode").fontWeight(.semibold)
                     HStack(spacing: 6) {
-                        ForEach(ACMode.allCases) { mode in
-                            VStack(spacing: 5) {
+                        ForEach(store.availableModes) { mode in
+                            let current = store.state?.acMode == mode
+                            Button { command(.setting(mode: mode)) } label: { VStack(spacing: 5) {
                                 Image(systemName: mode.symbol).font(.system(size: 14))
-                                Text(mode.title).font(.system(size: 9, weight: .medium))
+                                Text(mode.title).font(.system(size: 9, weight: current ? .bold : .medium))
                             }.frame(maxWidth: .infinity).frame(height: 46)
-                                .foregroundStyle(Theme.accent(for: mode))
-                                .background(RoundedRectangle(cornerRadius: Theme.buttonRadius, style: .continuous).fill(Theme.accent(for: mode).opacity(0.1)))
+                                .foregroundStyle(Theme.accent(for: mode).opacity(current || store.state == nil ? 1 : 0.55))
+                                .background(RoundedRectangle(cornerRadius: Theme.buttonRadius, style: .continuous)
+                                    .fill(Theme.accent(for: mode).opacity(current ? 0.24 : 0.07)))
+                                .overlay(RoundedRectangle(cornerRadius: Theme.buttonRadius, style: .continuous)
+                                    .strokeBorder(current ? Theme.accent(for: mode).opacity(0.7) : .clear, lineWidth: 1))
+                                .contentShape(Rectangle())
+                            }.buttonStyle(.plain).disabled(!store.canSendCommands || (current && store.state?.isOn == true))
+                                .help(mode.title)
                         }
+                    }
+                    if let state = store.state {
+                        HStack {
+                            Text("Fan").foregroundStyle(Theme.mutedInk)
+                            Spacer()
+                            Menu {
+                                ForEach(FanSpeed.allCases) { speed in Button(speed.title) { command(.setting(fan: speed)) } }
+                            } label: {
+                                Text(state.fanSpeed?.title ?? state.fan.map { "Unknown (\($0))" } ?? "Not reported").fontWeight(.medium)
+                            }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canSendCommands || !state.canChangeFan)
+                        }.font(.system(size: 11))
+                        detailRow("Swing", [state.vSwing == 1 ? "Vertical" : nil, state.hSwing == 1 ? "Horizontal" : nil].compactMap { $0 }.joined(separator: " + ").nonEmpty ?? "Off")
+                        detailRow("Presets", [state.econo == 1 ? "Econo" : nil, state.powerchill == 1 ? "Powerful" : nil, state.goodSleep == 1 ? "Sleep" : nil,
+                                              state.streamer == 1 ? "Streamer" : nil, state.coanda == 1 ? "Coanda" : nil, state.outQuite == 1 ? "Outdoor quiet" : nil]
+                            .compactMap { $0 }.joined(separator: ", ").nonEmpty ?? "None")
                     }
                 }
             }
-            placeholder("Controls arrive after sign-in", "The app reads your AC state first. Commands are only sent after a successful read.", symbol: "lock")
+            readStatus
+        }
+    }
+
+    @ViewBuilder private var readStatus: some View {
+        if !store.signedIn {
+            placeholder("Sign in to read your AC", "Open Settings and sign in with your Daikin account.", symbol: "lock")
+        } else if let lastRead = store.lastRead {
+            HStack(spacing: 6) {
+                if store.reading { ProgressView().controlSize(.mini) } else { Image(systemName: "checkmark.circle").foregroundStyle(Theme.mutedInk) }
+                Text("Read from the cloud at \(lastRead.formatted(date: .omitted, time: .standard))\(store.pendingDesired == nil ? "" : " · command pending")")
+                    .font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+                Spacer()
+                if store.sendingCommand != nil { ProgressView().controlSize(.mini); Text("Sending…").font(.system(size: 9)).foregroundStyle(Theme.mutedInk) }
+                else if !store.commandsAllowed { Text("Read-only").font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(Theme.faintInk) }
+            }.padding(.horizontal, 2)
+        } else {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(store.reading ? "Reading the AC state…" : "Waiting for the first read…").font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
+            }.padding(.horizontal, 2)
         }
     }
 
@@ -204,7 +255,7 @@ struct ACView: View {
 
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if store.signedIn { accountCard; devicesCard } else { signInCard }
+            if store.signedIn { accountCard; devicesCard; commandsCard } else { signInCard }
             Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }.buttonStyle(.link).font(.system(size: 11))
         }
     }
@@ -233,6 +284,24 @@ struct ACView: View {
         guard !store.signingIn, !password.isEmpty else { return }
         let typed = password
         Task { await store.signIn(email: email, password: typed); password = "" }
+    }
+
+    private var commandsCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: $store.commandsAllowed) { Text("Allow sending commands").fontWeight(.semibold) }.toggleStyle(.switch).controlSize(.small)
+                Text("Commands change the AC in your home. They are sent only after the app has read its current state.")
+                    .font(.system(size: 10)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func command(_ change: Port1) { Task { await store.send(change) } }
+
+    private func stepButton(_ symbol: String, _ target: Int?) -> some View {
+        Button { if let target { command(.setting(temperature: target)) } } label: {
+            Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 22)
+        }.buttonStyle(PanelButton(accent: accent)).disabled(!store.canSendCommands || target == nil)
     }
 
     private var accountCard: some View {
@@ -310,6 +379,9 @@ struct ACView: View {
     }
 
     @ViewBuilder private var feedback: some View {
+        if let notice = store.notice, store.error == nil {
+            Label(notice, systemImage: "checkmark.circle").font(.system(size: 11)).foregroundStyle(Theme.mutedInk)
+        }
         if let error = store.error {
             PanelCard {
                 HStack(alignment: .top, spacing: 8) {
@@ -330,4 +402,8 @@ struct ACView: View {
             Text(store.state?.fwVer.map { "FW \($0)" } ?? "").font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(Theme.faintInk)
         }
     }
+}
+
+extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
