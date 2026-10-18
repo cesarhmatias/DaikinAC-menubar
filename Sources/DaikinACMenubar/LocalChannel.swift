@@ -67,7 +67,8 @@ enum LocalChannel {
     }
 
     static func status(at endpoint: NWEndpoint, key: Data) async throws -> Port1 {
-        let reply = try await LocalHTTP.send(Data("GET /acstatus HTTP/1.1\r\nhost: \(LocalHTTP.hostHeader(endpoint))\r\n\r\n".utf8), to: endpoint)
+        let request = Data("GET /acstatus HTTP/1.1\r\nhost: \(LocalHTTP.hostHeader(endpoint))\r\n\r\n".utf8)
+        let reply = try await LocalQueue.run { try await LocalHTTP.send(request, to: endpoint) }
         return try port1(from: reply, key: key, shape: "local-acstatus")
     }
 
@@ -75,13 +76,24 @@ enum LocalChannel {
     static func command(_ change: Port1, at endpoint: NWEndpoint, key: Data) async throws -> Port1 {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let body = try requestBody(json: try encoder.encode(PortEnvelope(port1: change)), key: key, iv: try randomIV())
-        let request = "POST /acstatus HTTP/1.1\r\nHost: \(LocalHTTP.hostHeader(endpoint))\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
-        let reply = try await LocalHTTP.send(Data(request.utf8), to: endpoint)
+        let request = Data("POST /acstatus HTTP/1.1\r\nHost: \(LocalHTTP.hostHeader(endpoint))\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8)
+        var reply = try await LocalQueue.run { try await LocalHTTP.send(request, to: endpoint) }
+        // The unit has answered 404 to a valid command once while busy; one retry after a pause.
+        if reply.status == 404 {
+            recordRefusal(reply)
+            try await Task.sleep(for: .milliseconds(500))
+            reply = try await LocalQueue.run { try await LocalHTTP.send(request, to: endpoint) }
+        }
         return try port1(from: reply, key: key, shape: "local-acstatus-command")
     }
 
+    private static func recordRefusal(_ reply: LocalHTTP.Reply) {
+        let summary: [String: Any] = ["http": reply.status, "body_length": reply.body.count, "body_start": String(reply.body.prefix(40))]
+        if let data = try? JSONSerialization.data(withJSONObject: summary) { ResponseShapes.record("local-refusal", data: data, status: reply.status) }
+    }
+
     private static func port1(from reply: LocalHTTP.Reply, key: Data, shape: String) throws -> Port1 {
-        guard reply.status == 200 else { throw DaikinError.message("The AC answered HTTP \(reply.status).") }
+        guard reply.status == 200 else { recordRefusal(reply); throw DaikinError.message("The AC answered HTTP \(reply.status).") }
         let json = try decodeReply(reply.body, key: key)
         if let data = try? JSONSerialization.data(withJSONObject: json) { ResponseShapes.record(shape, data: data, status: reply.status) }
         guard let object = json["port1"], let data = try? JSONSerialization.data(withJSONObject: object) else {
@@ -104,6 +116,21 @@ enum CRC16 {
         var crc: UInt16 = 0xFFFF
         for byte in bytes { crc = (crc << 8) ^ table[Int(UInt8(crc >> 8) ^ byte)] }
         return ~crc
+    }
+}
+
+// The unit's small HTTP server handles one connection at a time, so local requests
+// (status polls and commands) run strictly one after another.
+@MainActor enum LocalQueue {
+    private static var tail: Task<Void, Never>?
+    static func run<T>(_ operation: @escaping () async throws -> T) async throws -> T {
+        let previous = tail
+        let task = Task { () async throws -> T in
+            _ = await previous?.value
+            return try await operation()
+        }
+        tail = Task { _ = try? await task.value }
+        return try await task.value
     }
 }
 

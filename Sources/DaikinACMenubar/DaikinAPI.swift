@@ -200,7 +200,7 @@ enum ResponseShapes {
         "days_of_week", "execute_at", "type", "rule_type", "enabled",
     ]
     // Free text that explains failures; kept, but e-mail addresses and tokens inside are masked.
-    static let messageKeys: Set<String> = ["message", "Message", "error_desc", "error", "error_message", "status_msg", "errors"]
+    static let messageKeys: Set<String> = ["message", "Message", "error_desc", "error", "error_message", "status_msg", "errors", "body_start"]
 
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
