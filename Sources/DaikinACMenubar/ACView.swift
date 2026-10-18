@@ -15,7 +15,7 @@ enum ACTab: String, CaseIterable, Identifiable {
     }
     var preferredHeight: CGFloat {
         switch self {
-        case .control: return 560
+        case .control: return 600
         case .energy: return 350
         case .health: return 470
         case .schedules: return 300
@@ -168,10 +168,15 @@ struct ACView: View {
                                 Text(state.fanSpeed?.title ?? state.fan.map { "Unknown (\($0))" } ?? "Not reported").fontWeight(.medium)
                             }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canSendCommands || !state.canChangeFan)
                         }.font(.system(size: 11))
-                        detailRow("Swing", [state.vSwing == 1 ? "Vertical" : nil, state.hSwing == 1 ? "Horizontal" : nil].compactMap { $0 }.joined(separator: " + ").nonEmpty ?? "Off")
-                        detailRow("Presets", [state.econo == 1 ? "Econo" : nil, state.powerchill == 1 ? "Powerful" : nil, state.goodSleep == 1 ? "Sleep" : nil,
-                                              state.streamer == 1 ? "Streamer" : nil, state.coanda == 1 ? "Coanda" : nil, state.outQuite == 1 ? "Outdoor quiet" : nil]
-                            .compactMap { $0 }.joined(separator: ", ").nonEmpty ?? "None")
+                        HStack(spacing: 6) {
+                            extra("Econo", "leaf", on: state.econo == 1, enabled: state.canUseEcono, state.setting(econo: state.econo != 1))
+                            extra("Powerful", "bolt", on: state.powerchill == 1, enabled: state.canUseExtras, state.setting(powerchill: state.powerchill != 1))
+                            extra("Coanda", "wind", on: state.coanda == 1, enabled: state.canUseExtras, state.setting(coanda: state.coanda != 1))
+                            extra("Swing", "arrow.up.and.down", on: state.vSwing == 1, enabled: state.canUseExtras, .setting(verticalSwing: state.vSwing != 1))
+                        }.padding(.top, 2)
+                        let others = [state.goodSleep == 1 ? "Good sleep" : nil, state.streamer == 1 ? "Streamer" : nil,
+                                      state.outQuite == 1 ? "Outdoor quiet" : nil, state.hSwing == 1 ? "Horizontal swing" : nil].compactMap { $0 }
+                        if !others.isEmpty { detailRow("Also on", others.joined(separator: ", ")) }
                     }
                 }
             }
@@ -297,6 +302,17 @@ struct ACView: View {
     }
 
     private func command(_ change: Port1) { Task { await store.send(change) } }
+
+    private func extra(_ title: String, _ symbol: String, on: Bool, enabled: Bool, _ change: Port1) -> some View {
+        Button { command(change) } label: {
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 12))
+                Text(title).font(.system(size: 9, weight: on ? .bold : .medium))
+            }.frame(maxWidth: .infinity).frame(height: 38)
+        }.buttonStyle(PanelButton(selected: on, accent: accent))
+            .disabled(!store.canSendCommands || !enabled)
+            .help(on ? "Turn \(title) off" : enabled ? "Turn \(title) on" : "\(title) needs the AC on\(title == "Econo" ? " and not in Fan mode" : "")")
+    }
 
     private func stepButton(_ symbol: String, _ target: Int?) -> some View {
         Button { if let target { command(.setting(temperature: target)) } } label: {
