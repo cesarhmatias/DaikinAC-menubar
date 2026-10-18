@@ -156,6 +156,29 @@ struct Port1: Codable, Equatable {
         return next == current ? nil : Port1.clampTemperature(next)
     }
     static func setting(fan: FanSpeed) -> Port1 { var p = Port1(); p.fan = fan.rawValue; return p }
+
+    // Extras, following the official app's "More" screen (HomeRemoteMoreFragment).
+    // Econo (energy saving) and PowerChill exclude each other; Coanda runs with automatic fan.
+    func setting(econo on: Bool) -> Port1 {
+        var p = Port1(); p.econo = on ? 1 : 0
+        if on, powerchill == 1 { p.powerchill = 0 }
+        return p
+    }
+    func setting(powerchill on: Bool) -> Port1 {
+        var p = Port1(); p.powerchill = on ? 1 : 0
+        if on, econo == 1 { p.econo = 0 }
+        if on, coanda == 1 { p.coanda = 0 }
+        return p
+    }
+    func setting(coanda on: Bool) -> Port1 {
+        var p = Port1(); p.coanda = on ? 1 : 0
+        if on { p.fan = FanSpeed.auto.rawValue }
+        if on, powerchill == 1 { p.powerchill = 0 }
+        return p
+    }
+    static func setting(verticalSwing on: Bool) -> Port1 { var p = Port1(); p.vSwing = on ? 1 : 0; return p }
+    var canUseExtras: Bool { isOn }
+    var canUseEcono: Bool { isOn && acMode != .fan }
 }
 
 // The shadow document wraps port1 as `{"state":{"reported":{"port1":…},"desired":…}}`.
