@@ -40,7 +40,8 @@ enum FeatureChecks {
         try testShadowDocumentAndCommandBody()
         try testCommandRules()
         try testEnergySummaryAndCache()
-        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching; energy summary (today, W1–W5, month), incremental cache with 6 h cadence and GET_KWH_DATA body.")
+        try testDeviceHealth()
+        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching; energy summary (today, W1–W5, month), incremental cache with 6 h cadence and GET_KWH_DATA body; subscription warning, read-only firmware check, diagnostics without sharing.")
     }
 
     // A syntactically valid, unsigned JWT built at runtime so no token-shaped literal is tracked.
@@ -372,7 +373,7 @@ enum FeatureChecks {
                   #"{"state":{"desired":{"port1":{"fan":17,"mode":2,"power":1},"src":5}}}"#, "DRY command")
 
         let identity = try IdentityPool.parseCredentials(["IdentityId": "x", "Credentials": ["AccessKeyId": "AK", "SecretKey": "SK", "SessionToken": "ST", "Expiration": 1_760_003_600]])
-        try equal(identity, AWSCredentials(accessKeyID: "AK", secretKey: "SK", sessionToken: "ST", expiration: Date(timeIntervalSince1970: 1_760_003_600)), "Identity Pool credentials")
+        try equal(identity, AWSCredentials(accessKeyID: "AK", secretKey: "SK", sessionToken: "ST", expiration: Date(timeIntervalSince1970: 1_760_003_600), identityID: "x"), "Identity Pool credentials")
         try rejects("missing credentials") { _ = try IdentityPool.parseCredentials(["IdentityId": "x"]) }
         let getID = try IdentityPool.request("GetId", ["IdentityPoolId": CognitoConfig.identityPoolID])
         try equal(getID.value(forHTTPHeaderField: "X-Amz-Target"), "AWSCognitoIdentityService.GetId", "GetId target")
@@ -442,5 +443,32 @@ enum FeatureChecks {
         try equal(Energy.requestBody(sub: "sub", thingID: "thing-a", lastRecordDate: "2026-10-16 12:00:00")["last_record_date"] as? String, "2026-10-16 12:00:00", "incremental sync")
         try equal(try Energy.parseRows([["date": "2026-10-01 00:00:00", "kwh_value": 1.5]]), [KWhReading(date: "2026-10-01 00:00:00", kwhValue: 1.5)], "kwh_data rows")
         try truth(!Energy.cacheURL(thingID: "thing-a").lastPathComponent.contains("thing-a"), "cache file name hides the thing_id")
+    }
+
+    static func testDeviceHealth() throws {
+        let now = DateComponents(calendar: Calendar(identifier: .gregorian), timeZone: .current, year: 2026, month: 10, day: 19, hour: 12).date!
+        try equal(DeviceHealth.subscriptionWarning(CloudSubscription(status: "ACTIVE", expiryDate: "2027-03-01"), now: now), nil, "far expiry")
+        try equal(DeviceHealth.subscriptionWarning(CloudSubscription(status: "ACTIVE", expiryDate: "2026-11-02"), now: now), "Cloud subscription ends in 14 days.", "within 30 days")
+        try truth(DeviceHealth.subscriptionWarning(CloudSubscription(status: "ACTIVE", expiryDate: "2026-10-01"), now: now)?.hasPrefix("Cloud subscription expired") == true, "expired")
+        try equal(DeviceHealth.subscriptionWarning(CloudSubscription(status: "EXPIRED", expiryDate: nil), now: now), "Cloud subscription is expired.", "inactive status")
+
+        let firmware = DeviceHealth.firmwareBody(sub: "sub", thingID: "thing-a", firmwareVersion: "p1.0.4.2")
+        try equal(firmware["request_type"] as? String, "GET_LATEST_FIRMWARE_DATA", "read-only firmware request")
+        try equal((firmware["data"] as? [[String: String]])?.first, ["thing_id": "thing-a", "fw_version": "p1.0.4.2"], "firmware data row")
+        let latest = DeviceHealth.parseFirmware(["status": "ok", "data": [["thing_id": "thing-a", "fw_status": "UPGRADE_AVAILABLE", "latest_fw_version": "p1.0.5.0"]]], thingID: "thing-a")
+        try equal(latest?.summary, "Update available: p1.0.5.0", "upgrade available")
+        try equal(DeviceHealth.parseFirmware(["data": [["thing_id": "thing-a", "fw_status": "LATEST"]]], thingID: "thing-a")?.summary, "Up to date", "latest")
+        try truth(DeviceHealth.parseFirmware(["data": []], thingID: "thing-a") == nil, "no rows")
+        try rejects("firmware statusCode 1") { _ = try APIStatus.statusCode(["statusCode": 1, "message": "x"], endpoint: "firmware") }
+
+        let body = DeviceHealth.diagnosticsBody(thingID: "thing-a", cognitoID: "us-east-1:id", sub: "sub", accessToken: "token", localReachable: false)
+        try equal(body["share_diagnostic_data"] as? String, "No", "diagnostic data is never shared")
+        try equal(body["cognito_id"] as? String, "us-east-1:id", "cognito_id is the Identity Pool id")
+        let report = DeviceHealth.parseDiagnostics(["statusCode": 200, "data": [
+            "device_access_mode": "CLOUD", "firmware_version": "p1.0.4.2", "status_texts": ["AC is online"],
+            "diagnosis_results": [["label": "App Connectivity Check", "status": "passed"]], "device_error_data": ["error_code": ""],
+            "email": "hidden", "mobile": "hidden", "thing_latitude": 1.0]])
+        try equal(report, DiagnosticReport(accessMode: "CLOUD", firmwareVersion: "p1.0.4.2", statusTexts: ["AC is online"],
+                                           results: [.init(label: "App Connectivity Check", status: "passed")], deviceErrorCode: nil), "diagnostics report")
     }
 }
