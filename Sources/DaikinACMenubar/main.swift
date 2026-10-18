@@ -66,6 +66,7 @@ private struct PanelShell: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             if !CommandLine.arguments.contains("--background") { self.show() }
+            Task { await self.store.start() }
         }
     }
     @objc func toggle() { if panel.isVisible { panel.orderOut(nil) } else { show() } }
