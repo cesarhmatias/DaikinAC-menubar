@@ -14,15 +14,6 @@ enum ACTab: String, CaseIterable, Identifiable {
         case .settings: return "gearshape"
         }
     }
-    var preferredHeight: CGFloat {
-        switch self {
-        case .control: return 600
-        case .energy: return 560
-        case .health: return 600
-        case .schedules: return 460
-        case .settings: return 560
-        }
-    }
     // `--tab <name>` opens the panel on that tab.
     static var launchTab: ACTab? {
         guard let index = CommandLine.arguments.firstIndex(of: "--tab"), CommandLine.arguments.count > index + 1 else { return nil }
@@ -42,30 +33,35 @@ struct ACView: View {
     }
     var body: some View {
         VStack(spacing: 0) {
-            header.padding(.top, 16).padding(.bottom, 16)
-            tabs.padding(.bottom, 14)
+            VStack(spacing: 0) {
+                header.padding(.top, 16).padding(.bottom, 16)
+                tabs.padding(.bottom, 14)
+            }.measured("chrome")
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    sectionTitle(tab.rawValue.uppercased())
+                    if tab != .control { sectionTitle(tab.rawValue.uppercased()) }
                     tabContent
                     feedback
-                }.padding(.bottom, 12)
-            }.scrollIndicators(.hidden)
-            footer.padding(.top, 10).padding(.bottom, 12)
+                }.padding(.bottom, 12).measured("content")
+            }.scrollIndicators(.never)
+            footer.padding(.top, 10).padding(.bottom, 12).measured("footer")
         }.padding(.horizontal, Theme.horizontalPadding).frame(width: Theme.panelWidth)
+            // The panel grows to fit the visible tab; it scrolls only when the screen is too short.
+            .onPreferenceChange(MeasuredHeights.self) { heights in
+                guard let chrome = heights["chrome"], let content = heights["content"], let footer = heights["footer"] else { return }
+                store.preferredPanelHeight = (Theme.arrowHeight + chrome + content + footer + 1).rounded(.up)
+            }
             .background(Theme.background)
             .foregroundStyle(Theme.ink).preferredColorScheme(.dark)
             .font(.system(size: 12))
             .tint(accent)
             .animation(.easeOut(duration: 0.22), value: store.state?.mode)
             .onChange(of: tab) { _, value in
-                store.preferredPanelHeight = value.preferredHeight
                 if value == .energy { Task { await store.loadEnergy() } }
             }
             .onChange(of: store.thingInfo) { _, _ in if tab == .energy { Task { await store.loadEnergy() } } }
             .onChange(of: store.selectedThingID) { _, _ in if tab == .energy { Task { await store.loadEnergy() } } }
             .onAppear {
-                store.preferredPanelHeight = tab.preferredHeight
                 if tab == .energy { Task { await store.loadEnergy() } }
             }
     }
@@ -126,24 +122,24 @@ struct ACView: View {
     private var controlPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             PanelCard {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(store.state.map { $0.isOn ? "TARGET" : "OFF · TARGET" } ?? "TARGET")
-                            .font(.system(size: 8, weight: .bold)).tracking(1.2).foregroundStyle(Theme.mutedInk)
-                        Text(store.state?.temperature.map { "\($0)°" } ?? "--")
-                            .font(.system(size: 44, weight: .medium, design: .rounded)).tracking(-1)
-                            .foregroundStyle(store.state?.temperature == nil ? Theme.faintInk : accent)
-                    }
-                    if let state = store.state, state.canChangeTemperature {
-                        VStack(spacing: 6) {
-                            stepButton("plus", state.steppedTemperature(by: 1))
-                            stepButton("minus", state.steppedTemperature(by: -1))
-                        }.padding(.leading, 4)
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 6) {
+                VStack(spacing: 8) {
+                    ACUnitIllustration(accent: accent, running: store.state?.isOn == true,
+                                       display: store.state.map { $0.isOn ? ($0.temperature.map { "\($0)°" } ?? "--") : "OFF" } ?? "--")
+                        .frame(maxWidth: .infinity)
+                    HStack(spacing: 14) {
                         reading("Room", store.state?.sensors?.room)
                         reading("Outdoor", store.state?.sensors?.outdoor)
+                        Spacer()
+                        Text(store.state.map { $0.isOn ? ($0.acMode?.title.uppercased() ?? "ON") : "OFF" } ?? "")
+                            .font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(store.state?.isOn == true ? accent : Theme.mutedInk)
+                    }
+                    TemperatureControl(value: store.state?.temperature,
+                                       range: store.state?.acMode?.temperatureRange ?? ACMode.cool.temperatureRange!,
+                                       enabled: store.canSendCommands && store.state?.canChangeTemperature == true,
+                                       accent: accent) { target in command(.setting(temperature: target)) }
+                    if let state = store.state, !state.canChangeTemperature {
+                        Text(state.powerchill == 1 ? "The target is fixed while Powerful is on." : "\(state.acMode?.title ?? "This") mode has no target temperature.")
+                            .font(.system(size: 9)).foregroundStyle(Theme.mutedInk)
                     }
                 }
             }
@@ -475,12 +471,6 @@ struct ACView: View {
             .help(on ? "Turn \(title) off" : enabled ? "Turn \(title) on" : "\(title) needs the AC on\(title == "Econo" ? " and not in Fan mode" : "")")
     }
 
-    private func stepButton(_ symbol: String, _ target: Int?) -> some View {
-        Button { if let target { command(.setting(temperature: target)) } } label: {
-            Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 22)
-        }.buttonStyle(PanelButton(accent: accent)).disabled(!store.canSendCommands || target == nil)
-    }
-
     private var accountCard: some View {
         PanelCard {
             HStack(spacing: 10) {
@@ -583,4 +573,16 @@ struct ACView: View {
 
 extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
+}
+
+// Heights of the panel's parts, used to size the panel to its content.
+struct MeasuredHeights: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) { value.merge(nextValue()) { $1 } }
+}
+
+extension View {
+    func measured(_ name: String) -> some View {
+        background(GeometryReader { proxy in Color.clear.preference(key: MeasuredHeights.self, value: [name: proxy.size.height]) })
+    }
 }
