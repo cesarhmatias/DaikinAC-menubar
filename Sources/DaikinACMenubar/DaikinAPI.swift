@@ -16,7 +16,6 @@ enum DaikinError: LocalizedError, Equatable {
 enum DaikinEndpoint {
     static let host = "dmb.iotalabs.co.in"
     static let manageThing = URL(string: "https://dmb.iotalabs.co.in/devices/thinginfo/managething")!
-    static let attachPolicy = URL(string: "https://dmb.iotalabs.co.in/policy/policy/attachprincipalpolicy")!
     static let diagnostics = URL(string: "https://dmb.iotalabs.co.in/diagnostics/smartac")!
     static let comfortProfiles = URL(string: "https://dmb.iotalabs.co.in/comfortprofile/comfort-profile-manager")!
     static let energy = URL(string: "https://dmb.iotalabs.co.in/energydata/device-kwh-data")!
@@ -189,6 +188,10 @@ enum ResponseShapes {
         "status", "statusCode", "result", "__type", "ChallengeName", "TokenType", "ExpiresIn", "is_device_authorized",
         "error_code", "manufacturer_error_code", "manufacturer", "model_name", "model_desc", "model_version",
         "appliance_type", "thing_model_no",
+        // Shadow state: AC settings and room temperatures, not personal data.
+        "power", "mode", "temperature", "fan", "h_swing", "v_swing", "coanda", "econo", "powerchill", "good_sleep",
+        "streamer", "out_quite", "on_timer_set", "on_timer_value", "off_timer_set", "off_timer_value",
+        "room_temp", "out_temp", "fw_ver", "src", "version", "ac_unit_type", "connected",
     ]
     // Free text that explains failures; kept, but e-mail addresses and tokens inside are masked.
     static let messageKeys: Set<String> = ["message", "Message", "error_desc", "error", "error_message"]
