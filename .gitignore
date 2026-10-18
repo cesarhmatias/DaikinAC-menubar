@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Build output / app bundle
+dist/
+.build/
+DerivedData/
+*.xcuserstate
+
+# Reverse-engineering material + local artifacts (never tracked — see CLAUDE.md)
+research/
+.local/
+*.xapk
+*.apk
+*.dex
+*.smali
+
+# Python tooling
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Node / Electron (if ever used)
+node_modules/
+*.log
