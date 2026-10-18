@@ -31,6 +31,10 @@ struct StoredSession: Codable {
     @Published private(set) var checkingFirmware = false
     @Published private(set) var diagnostics: DiagnosticReport?
     @Published private(set) var runningDiagnostics = false
+    @Published private(set) var comfortProfiles: [ComfortProfile]?
+    @Published private(set) var executionLogs: [ExecutionLog] = []
+    @Published private(set) var logsNextToken: String?
+    @Published private(set) var loadingSchedules = false
     // Off by default: commands change a physical device, so the user turns them on in Settings.
     @Published var commandsAllowed = UserDefaults.standard.bool(forKey: "commandsAllowed") {
         didSet { UserDefaults.standard.set(commandsAllowed, forKey: "commandsAllowed") }
@@ -242,6 +246,42 @@ struct StoredSession: Codable {
         }
     }
 
+    // MARK: Schedules (read-only)
+
+    var schedules: [ComfortRule] { comfortProfiles?.first { $0.thingID == selectedThing?.id }?.rules ?? [] }
+    // The logs cover the whole account; keep the ones whose rule belongs to this device.
+    var deviceLogs: [ExecutionLog] {
+        let ids = Set(schedules.map(\.id))
+        return ids.isEmpty ? executionLogs : executionLogs.filter { $0.ruleID.map(ids.contains) ?? true }
+    }
+
+    // Loaded once when the tab opens; Reload asks again.
+    func loadSchedules(force: Bool = false) async {
+        guard signedIn, !loadingSchedules, force || comfortProfiles == nil else { return }
+        loadingSchedules = true
+        defer { loadingSchedules = false }
+        do {
+            let tokens = try await validTokens()
+            comfortProfiles = try await Schedules.profiles(tokens: tokens)
+            let page = try await Schedules.executionLogs(tokens: tokens, nextToken: nil)
+            executionLogs = page.logs; logsNextToken = page.nextToken
+        } catch {
+            self.error = "Could not load schedules: \(error.localizedDescription)"
+        }
+    }
+
+    func loadMoreLogs() async {
+        guard signedIn, !loadingSchedules, let token = logsNextToken else { return }
+        loadingSchedules = true
+        defer { loadingSchedules = false }
+        do {
+            let page = try await Schedules.executionLogs(tokens: try await validTokens(), nextToken: token)
+            executionLogs += page.logs; logsNextToken = page.nextToken
+        } catch {
+            self.error = "Could not load more history: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: Commands
 
     private var commandTimeout: Task<Void, Never>?
@@ -297,7 +337,7 @@ struct StoredSession: Codable {
 
     private func forgetSession() {
         disconnectShadow()
-        tokens = nil; accountEmail = nil; thingInfo = nil; state = nil; energy = nil; energyCache = nil; firmware = nil; diagnostics = nil; errorTranslations = [:]; credentials = nil; pendingDesired = nil; lastRead = nil
+        tokens = nil; accountEmail = nil; thingInfo = nil; state = nil; energy = nil; energyCache = nil; firmware = nil; diagnostics = nil; errorTranslations = [:]; comfortProfiles = nil; executionLogs = []; logsNextToken = nil; credentials = nil; pendingDesired = nil; lastRead = nil
         Keychain.delete(.session)
     }
 }
