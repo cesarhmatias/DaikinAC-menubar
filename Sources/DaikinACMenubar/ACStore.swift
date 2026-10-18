@@ -434,10 +434,12 @@ struct StoredSession: Codable {
     // MARK: Commands
 
     private var commandTimeout: Task<Void, Never>?
-    var canSendCommands: Bool { commandsAllowed && state != nil && (connection != nil || localEndpoint != nil) && sendingCommand == nil }
+    // A channel must be open; the current state need not be known yet (the user's choice):
+    // a command sent before the first read simply overrides whatever the unit is doing.
+    var canSendCommands: Bool { commandsAllowed && (connection != nil || localEndpoint != nil) && sendingCommand == nil }
     var availableModes: [ACMode] { unitType?.uppercased() == "COOL_ONLY" ? ACMode.allCases.filter { $0 != .heat } : ACMode.allCases }
 
-    // Sends one change after a successful read. The command counts as applied once the
+    // Sends one change. The command counts as applied once the
     // shadow's `desired` is cleared and `reported` shows the new values (10 s, like the app).
     func send(_ change: Port1) async {
         guard canSendCommands else { return }
