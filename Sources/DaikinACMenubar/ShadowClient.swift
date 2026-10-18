@@ -7,6 +7,7 @@ struct AWSCredentials: Equatable {
     var secretKey: String
     var sessionToken: String
     var expiration: Date
+    var identityID: String?   // the Identity Pool id, sent as `cognito_id` by the diagnostics call
     func needsRefresh(now: Date = Date()) -> Bool { expiration.timeIntervalSince(now) < 5 * 60 }
 }
 
@@ -29,7 +30,7 @@ enum IdentityPool {
             throw DaikinError.message("The Identity Pool returned no credentials.")
         }
         let expiration = (credentials["Expiration"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? Date().addingTimeInterval(3600)
-        return AWSCredentials(accessKeyID: accessKey, secretKey: secret, sessionToken: token, expiration: expiration)
+        return AWSCredentials(accessKeyID: accessKey, secretKey: secret, sessionToken: token, expiration: expiration, identityID: json["IdentityId"] as? String)
     }
 
     static func request(_ action: String, _ body: [String: Any]) throws -> URLRequest {

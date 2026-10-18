@@ -194,6 +194,8 @@ enum ResponseShapes {
         "room_temp", "out_temp", "fw_ver", "src", "version", "ac_unit_type", "connected",
         // Energy rows: the timestamp format matters, the meter value is masked.
         "date",
+        // Firmware and diagnostics: release state and check results, not personal data.
+        "fw_status", "latest_fw_version", "device_access_mode", "firmware_version", "label", "status_texts",
     ]
     // Free text that explains failures; kept, but e-mail addresses and tokens inside are masked.
     static let messageKeys: Set<String> = ["message", "Message", "error_desc", "error", "error_message"]
