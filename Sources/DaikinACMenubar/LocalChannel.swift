@@ -238,7 +238,7 @@ enum LocalDiscovery {
     // its address, then talk to port 15914. Nothing is stored. UDP is used only to resolve:
     // it has no handshake, so the connection is ready once the name resolves and nothing is
     // sent (the unit refuses TCP on the advertised port 80).
-    static func localAPIEndpoint(for service: NWEndpoint, timeout: TimeInterval = 5) async -> NWEndpoint? {
+    static func localAPIEndpoint(for service: NWEndpoint, timeout: TimeInterval = 8) async -> NWEndpoint? {
         let connection = NWConnection(to: service, using: .udp)
         let queue = DispatchQueue(label: "br.local.DaikinAC.resolve")
         let host: NWEndpoint.Host? = await withCheckedContinuation { continuation in
