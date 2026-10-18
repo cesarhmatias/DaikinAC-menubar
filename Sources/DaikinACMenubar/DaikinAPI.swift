@@ -192,6 +192,8 @@ enum ResponseShapes {
         "power", "mode", "temperature", "fan", "h_swing", "v_swing", "coanda", "econo", "powerchill", "good_sleep",
         "streamer", "out_quite", "on_timer_set", "on_timer_value", "off_timer_set", "off_timer_value",
         "room_temp", "out_temp", "fw_ver", "src", "version", "ac_unit_type", "connected",
+        // Energy rows: the timestamp format matters, the meter value is masked.
+        "date",
     ]
     // Free text that explains failures; kept, but e-mail addresses and tokens inside are masked.
     static let messageKeys: Set<String> = ["message", "Message", "error_desc", "error", "error_message"]
