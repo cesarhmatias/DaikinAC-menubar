@@ -1,7 +1,16 @@
 import SwiftUI
+import Network
 
 // What survives a restart: the e-mail shown in Settings and the refresh token.
 // The password is never stored.
+// The unit used on the local network without sign-in. Saved from GET_THING_INFO after a
+// sign-in, or typed by the user (the Device Key from the Daikin app's Home Assistant screen).
+struct LocalDevice: Codable, Equatable {
+    var name: String
+    var apn: String?
+    var key: String
+}
+
 struct StoredSession: Codable {
     var email: String
     var refreshToken: String
@@ -20,6 +29,12 @@ struct StoredSession: Codable {
     @Published private(set) var pendingDesired: Port1?
     @Published private(set) var lastRead: Date?
     @Published private(set) var reading = false
+    @Published private(set) var channel: StateChannel?
+    @Published private(set) var localStatus: String?
+    // On by default: the local network is tried first, the cloud is the fallback.
+    @Published var preferLocal = UserDefaults.standard.object(forKey: "preferLocal") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(preferLocal, forKey: "preferLocal"); if panelVisible { disconnectAll(); Task { await connectBest() } } }
+    }
     @Published private(set) var unitType: String?
     @Published private(set) var sendingCommand: Port1?
     @Published var notice: String?
@@ -35,8 +50,8 @@ struct StoredSession: Codable {
     @Published private(set) var executionLogs: [ExecutionLog] = []
     @Published private(set) var logsNextToken: String?
     @Published private(set) var loadingSchedules = false
-    // Off by default: commands change a physical device, so the user turns them on in Settings.
-    @Published var commandsAllowed = UserDefaults.standard.bool(forKey: "commandsAllowed") {
+    // On by default (the user's choice); Settings can turn commands off.
+    @Published var commandsAllowed = UserDefaults.standard.object(forKey: "commandsAllowed") as? Bool ?? true {
         didSet { UserDefaults.standard.set(commandsAllowed, forKey: "commandsAllowed") }
     }
     @Published var status = "Not signed in"
@@ -45,7 +60,9 @@ struct StoredSession: Codable {
     var signedIn: Bool { tokens != nil }
     var things: [Thing] { thingInfo?.things ?? [] }
     var selectedThing: Thing? { things.first { $0.id == selectedThingID } ?? things.first }
-    var deviceName: String { selectedThing?.name ?? "Daikin AC" }
+    var deviceName: String { selectedThing?.name ?? localDevice?.name ?? "Daikin AC" }
+    @Published private(set) var localDevice: LocalDevice? = Keychain.read(.localDevice).flatMap { try? JSONDecoder().decode(LocalDevice.self, from: $0) }
+    var canUseLocalOnly: Bool { !signedIn && localDevice != nil }
     var accent: Color { state?.isOn == true ? Theme.accent(for: state?.acMode) : Theme.neutralAccent }
 
     // Restores the saved session with a single refresh. A rejected refresh token
@@ -106,26 +123,59 @@ struct StoredSession: Codable {
                 select(info.things.first)
             }
             status = info.things.isEmpty ? "No devices on this account" : "Signed in"
-            if panelVisible { await connectShadow() }
+            if panelVisible { await connectBest() }
         } catch {
             self.error = "Could not load devices: \(error.localizedDescription)"
         }
     }
 
+    // Remembers the selected unit for local control without sign-in.
+    private func rememberLocalDevice(_ thing: Thing?) {
+        guard let thing, let key = thing.secretKey else { return }
+        let device = LocalDevice(name: thing.name, apn: thing.apn, key: key)
+        guard device != localDevice, let data = try? JSONEncoder().encode(device) else { return }
+        try? Keychain.save(data, as: .localDevice)
+        localDevice = device
+    }
+
+    // Saves a typed Device Key and tries it on the local network; it is kept only if the unit answers.
+    func useLocalDevice(key text: String, name: String) async {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard LocalChannel.key(fromDeviceKey: text) != nil else { error = "That is not a valid device key (base64 of 16, 24 or 32 bytes)."; return }
+        let previous = localDevice
+        localDevice = LocalDevice(name: name.isEmpty ? "Daikin AC" : name, apn: nil, key: text)
+        disconnectAll()
+        await connectBest()
+        if channel == .local, let device = localDevice, let data = try? JSONEncoder().encode(device) {
+            try? Keychain.save(data, as: .localDevice)
+        } else {
+            localDevice = previous
+            error = "The key did not open any Daikin unit on this network. " + (localStatus ?? "")
+        }
+    }
+
+    func forgetLocalDevice() {
+        Keychain.delete(.localDevice)
+        localDevice = nil
+        if !signedIn { disconnectAll(); state = nil }
+    }
+
     func select(_ thing: Thing?) {
+        rememberLocalDevice(thing)
         let changed = thing?.id != selectedThingID
         selectedThingID = thing?.id
         if let id = thing?.id { try? Keychain.save(id, as: .selectedThing) } else { Keychain.delete(.selectedThing) }
         guard changed else { return }
-        disconnectShadow()
+        disconnectAll()
         state = nil; pendingDesired = nil; lastRead = nil; unitType = nil; energy = nil; energyCache = nil; firmware = nil; diagnostics = nil
-        if panelVisible { Task { await connectShadow() } }
+        if panelVisible { Task { await connectBest() } }
     }
 
     // MARK: Shadow state
 
     private var credentials: AWSCredentials?
-    private var connection: ShadowConnection?
+    // Published so controls update the moment a channel opens or closes.
+    @Published private var connection: ShadowConnection?
     private var panelVisible = false
 
     // The shadow connection is open only while the panel is visible. A failed attempt is
@@ -133,7 +183,96 @@ struct StoredSession: Codable {
     func setPanelVisible(_ visible: Bool) {
         guard visible != panelVisible else { return }
         panelVisible = visible
-        if visible { Task { await connectShadow() } } else { disconnectShadow() }
+        if visible { Task { await connectBest() } } else { disconnectAll() }
+    }
+
+    // MARK: Local network
+
+    @Published private var localEndpoint: NWEndpoint?
+    private var localKey: Data?
+    private var localPoll: Task<Void, Never>?
+    private var connecting = false
+    static let localPollInterval: Duration = .seconds(10)
+
+    // Tries the unit on the local network first (mDNS + a decrypted GET /acstatus proves it is
+    // this device), then falls back to the cloud shadow.
+    func connectBest() async {
+        guard panelVisible, connection == nil, localEndpoint == nil, !connecting else { return }
+        // Signed in: the selected device from GET_THING_INFO. Signed out: the saved local device.
+        let target: (id: String?, apn: String?, key: String?)
+        if signedIn, let thing = selectedThing { target = (thing.id, thing.apn, thing.secretKey ?? localDevice?.key) }
+        else if !signedIn, let device = localDevice { target = (nil, device.apn, device.key) }
+        else { return }
+        connecting = true
+        defer { connecting = false }
+        if preferLocal || !signedIn, let text = target.key, let key = LocalChannel.key(fromDeviceKey: text) {
+            reading = true
+            let units = await LocalDiscovery.browse()
+            var failures: [String] = []
+            for unit in LocalDiscovery.candidates(units, apn: target.apn) {
+                guard panelVisible, selectedThing?.id == target.id || !signedIn else { reading = false; return }
+                do {
+                    guard let endpoint = await LocalDiscovery.localAPIEndpoint(for: unit.endpoint) else {
+                        throw DaikinError.message("Could not resolve the unit's address.")
+                    }
+                    let reported = try await LocalChannel.status(at: endpoint, key: key)
+                    localEndpoint = endpoint; localKey = key; channel = .local
+                    localStatus = "Connected on the local network."
+                    applyLocal(reported)
+                    startLocalPolling()
+                    return
+                } catch {
+                    failures.append(error.localizedDescription)
+                }
+            }
+            reading = false
+            localStatus = units.isEmpty ? "No Daikin unit found on this network\(signedIn ? "; using the cloud." : ".")"
+                : "Found \(units.count) unit\(units.count == 1 ? "" : "s") but could not read it: \(failures.joined(separator: " / "))"
+            if let data = try? JSONSerialization.data(withJSONObject: ["found": units.count, "errors": failures]) {
+                ResponseShapes.record("local-attempt", data: data, status: 0)
+            }
+        }
+        guard signedIn, panelVisible, let thing = selectedThing, thing.id == target.id else { return }
+        await connectShadow()
+    }
+
+    private func applyLocal(_ reported: Port1) {
+        reading = false
+        state = reported; pendingDesired = nil; lastRead = Date()
+    }
+
+    private func startLocalPolling() {
+        localPoll?.cancel()
+        localPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: ACStore.localPollInterval)
+                guard !Task.isCancelled else { return }
+                await self?.pollLocal()
+            }
+        }
+    }
+
+    private func pollLocal() async {
+        guard let endpoint = localEndpoint, let key = localKey, sendingCommand == nil else { return }
+        do {
+            applyLocal(try await LocalChannel.status(at: endpoint, key: key))
+        } catch {
+            stopLocal()
+            self.error = "Lost the AC on the local network\(signedIn ? "; using the cloud" : ""). (\(error.localizedDescription))"
+            if signedIn { await connectShadow() }
+        }
+    }
+
+    private func stopLocal() {
+        localPoll?.cancel(); localPoll = nil
+        localEndpoint = nil; localKey = nil
+        if channel == .local { channel = nil }
+    }
+
+    func disconnectAll() {
+        stopLocal()
+        disconnectShadow()
+        channel = nil
     }
 
     func connectShadow() async {
@@ -144,6 +283,7 @@ struct StoredSession: Codable {
         connection.onDocument = { [weak self] document in
             guard let self, self.selectedThing?.id == thing.id else { return }
             self.reading = false
+            self.channel = .cloud
             self.state = document.reported
             self.pendingDesired = document.desired
             self.unitType = document.unitType ?? self.unitType
@@ -285,14 +425,28 @@ struct StoredSession: Codable {
     // MARK: Commands
 
     private var commandTimeout: Task<Void, Never>?
-    var canSendCommands: Bool { commandsAllowed && state != nil && connection != nil && sendingCommand == nil }
+    var canSendCommands: Bool { commandsAllowed && state != nil && (connection != nil || localEndpoint != nil) && sendingCommand == nil }
     var availableModes: [ACMode] { unitType?.uppercased() == "COOL_ONLY" ? ACMode.allCases.filter { $0 != .heat } : ACMode.allCases }
 
     // Sends one change after a successful read. The command counts as applied once the
     // shadow's `desired` is cleared and `reported` shows the new values (10 s, like the app).
     func send(_ change: Port1) async {
-        guard canSendCommands, let connection else { return }
+        guard canSendCommands else { return }
         sendingCommand = change; notice = nil; error = nil
+        // On the local network the reply is the unit's new state.
+        if let endpoint = localEndpoint, let key = localKey {
+            do {
+                let reported = try await LocalChannel.command(change, at: endpoint, key: key)
+                applyLocal(reported)
+                finishCommand(notice: reported.satisfies(change) ? "Applied by the AC (local network)." : nil)
+                if !reported.satisfies(change) { error = "The AC answered but did not apply the change." }
+            } catch {
+                finishCommand(notice: nil)
+                self.error = "Could not send the command on the local network: \(error.localizedDescription)"
+            }
+            return
+        }
+        guard let connection else { finishCommand(notice: nil); return }
         do {
             try await connection.publishDesired(change)
         } catch {
@@ -315,7 +469,8 @@ struct StoredSession: Codable {
     }
 
     func readState() async {
-        if let connection { try? await connection.requestDocument() } else { await connectShadow() }
+        if localEndpoint != nil { await pollLocal() }
+        else if let connection { try? await connection.requestDocument() } else { await connectBest() }
     }
 
     private func validCredentials() async throws -> AWSCredentials {
@@ -325,7 +480,7 @@ struct StoredSession: Codable {
         return fresh
     }
 
-    func stop() { disconnectShadow() }
+    func stop() { disconnectAll() }
 
     private func validTokens() async throws -> CognitoTokens {
         guard let current = tokens else { throw DaikinError.message("Not signed in.") }
@@ -336,8 +491,12 @@ struct StoredSession: Codable {
     }
 
     private func forgetSession() {
-        disconnectShadow()
+        disconnectAll()
         tokens = nil; accountEmail = nil; thingInfo = nil; state = nil; energy = nil; energyCache = nil; firmware = nil; diagnostics = nil; errorTranslations = [:]; comfortProfiles = nil; executionLogs = []; logsNextToken = nil; credentials = nil; pendingDesired = nil; lastRead = nil
         Keychain.delete(.session)
     }
+}
+
+enum StateChannel: String {
+    case local = "the local network", cloud = "the cloud"
 }
