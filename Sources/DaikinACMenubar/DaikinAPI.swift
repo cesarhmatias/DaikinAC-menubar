@@ -196,9 +196,11 @@ enum ResponseShapes {
         "date",
         // Firmware and diagnostics: release state and check results, not personal data.
         "fw_status", "latest_fw_version", "device_access_mode", "firmware_version", "label", "status_texts",
+        // Comfort profiles: schedule structure, not the user's rule names.
+        "days_of_week", "execute_at", "type", "rule_type", "enabled",
     ]
     // Free text that explains failures; kept, but e-mail addresses and tokens inside are masked.
-    static let messageKeys: Set<String> = ["message", "Message", "error_desc", "error", "error_message"]
+    static let messageKeys: Set<String> = ["message", "Message", "error_desc", "error", "error_message", "status_msg"]
 
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
