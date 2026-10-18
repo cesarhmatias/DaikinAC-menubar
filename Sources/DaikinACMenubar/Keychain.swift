@@ -2,12 +2,13 @@ import Foundation
 import Security
 
 // Generic-password items under one service, as in LGwebOS-menubar's Keychain.swift (MIT).
-// Holds user data only: the signed-in e-mail, the refresh token and the chosen device.
+// Holds user data only: the signed-in e-mail, the refresh token, the chosen device and,
+// for local control without sign-in, that device's name, apn and device key.
 enum Keychain {
     static let service = "br.local.DaikinAC"
 
     enum Account: String {
-        case session, selectedThing = "selected-thing"
+        case session, selectedThing = "selected-thing", localDevice = "local-device"
     }
 
     private static func query(_ account: Account) -> [String: Any] {
