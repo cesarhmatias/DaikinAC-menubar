@@ -58,10 +58,10 @@ private struct PanelShell: View {
             DispatchQueue.main.async { if self?.panel.isVisible == true { self?.show() } }
         }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            DispatchQueue.main.async { self?.panel.orderOut(nil) }
+            DispatchQueue.main.async { self?.hidePanel() }
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53, self?.panel.isVisible == true { self?.panel.orderOut(nil); return nil }
+            if event.keyCode == 53, self?.panel.isVisible == true { self?.hidePanel(); return nil }
             return event
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -69,7 +69,12 @@ private struct PanelShell: View {
             Task { await self.store.start() }
         }
     }
-    @objc func toggle() { if panel.isVisible { panel.orderOut(nil) } else { show() } }
+    @objc func toggle() { if panel.isVisible { hidePanel() } else { show() } }
+    func hidePanel() {
+        guard panel.isVisible else { return }
+        panel.orderOut(nil)
+        store.setPanelVisible(false)
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
     func show() {
         guard let button = statusItem.button, let anchorWindow = button.window else { return }
@@ -85,8 +90,10 @@ private struct PanelShell: View {
         else { let controller = NSHostingController(rootView: root); host = controller; panel.contentViewController = controller }
         // Use screen coordinates explicitly so AppKit cannot flip the panel above the menu bar.
         panel.setFrame(NSRect(x: x, y: top - height, width: Theme.panelWidth, height: height), display: true)
+        let wasVisible = panel.isVisible
         NSApplication.shared.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        if !wasVisible { store.setPanelVisible(true) }
     }
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()
