@@ -91,12 +91,24 @@ struct ACView: View {
                 Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }
             } label: { Image(systemName: "ellipsis").frame(width: 24, height: 30).foregroundStyle(Theme.mutedInk) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            Button { if let state = store.state { command(.setting(power: !state.isOn)) } } label: {
-                Image(systemName: "power").font(.system(size: 17)).foregroundStyle(store.state?.isOn == true ? accent : Theme.mutedInk)
-                    .frame(width: 34, height: 34).background(Circle().fill(store.state?.isOn == true ? accent.opacity(0.18) : Theme.buttonFill))
-            }.buttonStyle(.plain).disabled(!store.canSendCommands)
-                .help(store.commandsAllowed ? (store.state?.isOn == true ? "Turn the AC off" : "Turn the AC on") : "Allow commands in Settings first")
+            if let state = store.state {
+                Button { command(.setting(power: !state.isOn)) } label: { powerIcon }
+                    .buttonStyle(.plain).disabled(!store.canSendCommands)
+                    .help(store.commandsAllowed ? (state.isOn ? "Turn the AC off" : "Turn the AC on") : "Allow commands in Settings first")
+            } else {
+                // The state is not known yet, so offer both instead of a toggle.
+                Menu {
+                    Button("Turn on") { command(.setting(power: true)) }
+                    Button("Turn off") { command(.setting(power: false)) }
+                } label: { powerIcon }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().disabled(!store.canSendCommands).help("AC power")
+            }
         }
+    }
+
+    private var powerIcon: some View {
+        Image(systemName: "power").font(.system(size: 17)).foregroundStyle(store.state?.isOn == true ? accent : Theme.mutedInk)
+            .frame(width: 34, height: 34).background(Circle().fill(store.state?.isOn == true ? accent.opacity(0.18) : Theme.buttonFill))
     }
 
     private var tabs: some View {
@@ -136,8 +148,8 @@ struct ACView: View {
                             .font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(store.state?.isOn == true ? accent : Theme.mutedInk)
                     }
                     TemperatureControl(value: store.state?.temperature,
-                                       range: store.state?.acMode?.temperatureRange ?? ACMode.cool.temperatureRange!,
-                                       enabled: store.canSendCommands && store.state?.canChangeTemperature == true,
+                                       range: store.state.map { $0.acMode?.temperatureRange ?? ACMode.cool.temperatureRange! } ?? Port1.temperatureRange,
+                                       enabled: store.canSendCommands && (store.state?.canChangeTemperature ?? true),
                                        accent: accent) { target in command(.setting(temperature: target)) }
                     if let state = store.state, !state.canChangeTemperature {
                         Text(state.powerchill == 1 ? "The target is fixed while Powerful is on." : "\(state.acMode?.title ?? "This") mode has no target temperature.")
@@ -165,16 +177,16 @@ struct ACView: View {
                                 .help(mode.title)
                         }
                     }
+                    HStack {
+                        Text("Fan").foregroundStyle(Theme.mutedInk)
+                        Spacer()
+                        Menu {
+                            ForEach(FanSpeed.allCases) { speed in Button(speed.title) { command(.setting(fan: speed)) } }
+                        } label: {
+                            Text(store.state.map { $0.fanSpeed?.title ?? $0.fan.map { "Unknown (\($0))" } ?? "Not reported" } ?? "Choose").fontWeight(.medium)
+                        }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canSendCommands || !(store.state?.canChangeFan ?? true))
+                    }.font(.system(size: 11))
                     if let state = store.state {
-                        HStack {
-                            Text("Fan").foregroundStyle(Theme.mutedInk)
-                            Spacer()
-                            Menu {
-                                ForEach(FanSpeed.allCases) { speed in Button(speed.title) { command(.setting(fan: speed)) } }
-                            } label: {
-                                Text(state.fanSpeed?.title ?? state.fan.map { "Unknown (\($0))" } ?? "Not reported").fontWeight(.medium)
-                            }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canSendCommands || !state.canChangeFan)
-                        }.font(.system(size: 11))
                         HStack(spacing: 6) {
                             extra("Econo", "leaf", on: state.econo == 1, enabled: state.canUseEcono, state.setting(econo: state.econo != 1))
                             extra("Powerful", "bolt", on: state.powerchill == 1, enabled: state.canUseExtras, state.setting(powerchill: state.powerchill != 1))
@@ -480,7 +492,7 @@ struct ACView: View {
         PanelCard {
             VStack(alignment: .leading, spacing: 6) {
                 Toggle(isOn: $store.commandsAllowed) { Text("Allow sending commands").fontWeight(.semibold) }.toggleStyle(.switch).controlSize(.small)
-                Text("Commands change the AC in your home. They are sent only after the app has read its current state.")
+                Text("Commands change the AC in your home. They work even before the current state is read, and then override it.")
                     .font(.system(size: 10)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
                 Divider().opacity(0.3)
                 Toggle(isOn: $store.preferLocal) { Text("Use the local network when available").fontWeight(.semibold) }.toggleStyle(.switch).controlSize(.small)
