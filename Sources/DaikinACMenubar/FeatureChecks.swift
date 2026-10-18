@@ -41,7 +41,8 @@ enum FeatureChecks {
         try testCommandRules()
         try testEnergySummaryAndCache()
         try testDeviceHealth()
-        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching; energy summary (today, W1–W5, month), incremental cache with 6 h cadence and GET_KWH_DATA body; subscription warning, read-only firmware check, diagnostics without sharing.")
+        try testSchedulesRead()
+        print("PASS: CRC-16/GENIBUS check value and table; temperature clamp 10–32; port1 decode (mode 0 as AUTO, lenient numbers, sensors, fw_ver) and change-only encode; daily kWh deltas with meter reset, weekly and monthly totals; status 0 / \"success\" / statusCode 500|1; DAIKIN:<code> + pt-BR; SUN…SAT; Amplify USER_SRP_AUTH without SECRET_HASH; SRP k, A, HKDF and signature match pycognito; Cognito tokens, refresh, errors and challenges; GET_THING_INFO with error_data and cloud_subscription; read-only managething types; masked response shapes; SigV4 presigned IoT WebSocket URL matches botocore; MQTT 3.1.1 packets; shadow reported/desired parsing, command body with src 5, Identity Pool credentials; sensor sentinel 255, unit type, command rules, extras (Econo, PowerChill, Coanda) and confirmation matching; energy summary (today, W1–W5, month), incremental cache with 6 h cadence and GET_KWH_DATA body; subscription warning, read-only firmware check, diagnostics without sharing; comfort-profile reads (rules, SUN…SAT, settings, paged logs).")
     }
 
     // A syntactically valid, unsigned JWT built at runtime so no token-shaped literal is tracked.
@@ -470,5 +471,31 @@ enum FeatureChecks {
             "email": "hidden", "mobile": "hidden", "thing_latitude": 1.0]])
         try equal(report, DiagnosticReport(accessMode: "CLOUD", firmwareVersion: "p1.0.4.2", statusTexts: ["AC is online"],
                                            results: [.init(label: "App Connectivity Check", status: "passed")], deviceErrorCode: nil), "diagnostics report")
+    }
+
+    static func testSchedulesRead() throws {
+        try equal(Set(Schedules.ReadRequest.allCases.map(\.rawValue)), ["GET_COMFORT_PROFILES", "GET_COMFORT_PROFILE_EXEC_LOGS"], "only read request types")
+        let body = Schedules.readBody(.executionLogs, sub: "sub", nextToken: "page2")
+        try equal(body["next_token"] as? String, "page2", "next_token"); try equal(body["language"] as? String, "pt-BR", "language")
+        try truth(Schedules.readBody(.profiles, sub: "sub")["next_token"] == nil && Schedules.readBody(.profiles, sub: "sub")["thing_id"] == nil, "no thing_id, no empty token")
+
+        let profiles = Schedules.parseProfiles(["status": "success", "data": ["comfort_profiles": [["thing_id": "thing-a", "rules": [
+            ["rule_id": "r1", "rule_name": "Morning", "type": "RECURRING", "enabled": true, "updated_at": 1_760_000_000,
+             "settings": ["power": 1, "mode": 3, "temperature": 22, "fan": 7],
+             "schedule": ["days_of_week": ["FRI", "MON", "TUE", "WED", "THU"], "execute_at": "07:30", "start_date": "2026-01-01", "end_date": "2026-12-31"]],
+            ["rule_name": "no id, skipped"]]]]]])
+        try equal(profiles.count, 1, "one profile"); try equal(profiles[0].rules.count, 1, "rules with an id")
+        let rule = profiles[0].rules[0]
+        try equal(rule.days, [.mon, .tue, .wed, .thu, .fri], "days sorted SUN…SAT")
+        try equal(Schedules.describe(rule.days), "Weekdays", "weekday summary")
+        try equal(Schedules.describe([.sun, .sat]), "Weekends", "weekend summary"); try equal(Schedules.describe([.mon, .wed]), "Mon, Wed", "custom days")
+        try equal(rule.settings.acMode, .cool, "settings reuse port1 mode"); try equal(rule.settings.temperature, 22, "settings temperature")
+        try truth(rule.enabled && rule.executeAt == "07:30" && rule.updatedAt != nil, "enabled, time, updated_at")
+
+        let page = Schedules.parseLogs(["status": "success", "data": ["next_token": "t2", "exec_logs": [
+            ["pk": "p", "sk": "s1", "rule_id": "r1", "rule_name": "Morning", "executed_at": 1_760_000_000, "status": "SUCCESS", "status_msg": "ok"]]]])
+        try equal(page.nextToken, "t2", "next page token"); try equal(page.logs.first?.executedAt, Date(timeIntervalSince1970: 1_760_000_000), "executed_at seconds")
+        try equal(Schedules.parseLogs(["data": ["next_token": "", "exec_logs": []]]).nextToken, nil, "empty token ends paging")
+        try rejects("statusCode 500") { _ = try APIStatus.statusCode(["statusCode": 500, "message": "x"], endpoint: "comfortprofile") }
     }
 }
