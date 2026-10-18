@@ -2,8 +2,8 @@
 
 ## LGwebOS-menubar
 
-The menu bar shell, the design primitives and the build and privacy scripts are ported from
-LGwebOS-menubar and adapted for this app. No LG or webOS logic, assets or brand material is included.
+This app is inspired by [LGwebOS-menubar](https://github.com/gabrielgreco1/LGwebOS-menubar). Its menu
+bar shell, design primitives and build and privacy scripts are ported and adapted for this app. No LG or webOS logic, assets or brand material is included.
 
 | File in this project | Ported from LGwebOS-menubar | What was taken |
 |---|---|---|
