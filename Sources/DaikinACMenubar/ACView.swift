@@ -26,10 +26,12 @@ struct ACView: View {
     @State private var tab: ACTab
     @State private var email = ""
     @State private var password = ""
+    @State private var localKey = ""
+    @State private var localName = ""
     private var accent: Color { store.accent }
     init(store: ACStore) {
         self.store = store
-        _tab = State(initialValue: ACTab.launchTab ?? (store.signedIn ? .control : .settings))
+        _tab = State(initialValue: ACTab.launchTab ?? (store.signedIn || store.localDevice != nil ? .control : .settings))
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -190,12 +192,12 @@ struct ACView: View {
     }
 
     @ViewBuilder private var readStatus: some View {
-        if !store.signedIn {
-            placeholder("Sign in to read your AC", "Open Settings and sign in with your Daikin account.", symbol: "lock")
+        if !store.signedIn && store.localDevice == nil {
+            placeholder("Sign in to read your AC", "Open Settings and sign in, or add the Device Key for local control.", symbol: "lock")
         } else if let lastRead = store.lastRead {
             HStack(spacing: 6) {
                 if store.reading { ProgressView().controlSize(.mini) } else { Image(systemName: "checkmark.circle").foregroundStyle(Theme.mutedInk) }
-                Text("Read from the cloud at \(lastRead.formatted(date: .omitted, time: .standard))\(store.pendingDesired == nil ? "" : " · command pending")")
+                Text("Read from \(store.channel?.rawValue ?? "the cloud") at \(lastRead.formatted(date: .omitted, time: .standard))\(store.pendingDesired == nil ? "" : " · command pending")")
                     .font(.system(size: 10)).foregroundStyle(Theme.mutedInk)
                 Spacer()
                 if store.sendingCommand != nil { ProgressView().controlSize(.mini); Text("Sending…").font(.system(size: 9)).foregroundStyle(Theme.mutedInk) }
@@ -417,7 +419,7 @@ struct ACView: View {
 
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if store.signedIn { accountCard; devicesCard; commandsCard } else { signInCard }
+            if store.signedIn { accountCard; devicesCard; commandsCard } else { signInCard; localOnlyCard; if store.localDevice != nil { commandsCard } }
             Button("Quit DaikinAC-menubar") { NSApplication.shared.terminate(nil) }.buttonStyle(.link).font(.system(size: 11))
         }
     }
@@ -448,12 +450,46 @@ struct ACView: View {
         Task { await store.signIn(email: email, password: typed); password = "" }
     }
 
+    private var localOnlyCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Local network only", systemImage: "wifi").fontWeight(.semibold)
+                if let device = store.localDevice {
+                    HStack {
+                        Text(device.name).font(.system(size: 11, weight: .medium))
+                        Spacer()
+                        Button("Forget") { store.forgetLocalDevice() }.controlSize(.small)
+                    }
+                    Text(store.channel == .local ? "Controlling the AC on your Wi-Fi without the cloud." : (store.localStatus ?? "Open the panel near the AC's Wi-Fi to connect."))
+                        .font(.system(size: 10)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Control the AC on your Wi-Fi without signing in. Copy the Device Key from the Daikin app: Menu → Integrations → Home Assistant.")
+                        .font(.system(size: 10)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                    TextField("Name (optional)", text: $localName).textFieldStyle(.roundedBorder)
+                    SecureField("Device Key", text: $localKey).textFieldStyle(.roundedBorder)
+                    Button("Connect on the local network") {
+                        let key = localKey, name = localName
+                        Task { await store.useLocalDevice(key: key, name: name); if store.localDevice != nil { localKey = "" } }
+                    }.disabled(localKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+    }
+
     private var commandsCard: some View {
         PanelCard {
             VStack(alignment: .leading, spacing: 6) {
                 Toggle(isOn: $store.commandsAllowed) { Text("Allow sending commands").fontWeight(.semibold) }.toggleStyle(.switch).controlSize(.small)
                 Text("Commands change the AC in your home. They are sent only after the app has read its current state.")
                     .font(.system(size: 10)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                Divider().opacity(0.3)
+                Toggle(isOn: $store.preferLocal) { Text("Use the local network when available").fontWeight(.semibold) }.toggleStyle(.switch).controlSize(.small)
+                Text("Talks to the AC directly on your Wi-Fi, with the cloud as the fallback. macOS asks once for local network access.")
+                    .font(.system(size: 10)).foregroundStyle(Theme.mutedInk).fixedSize(horizontal: false, vertical: true)
+                if let status = store.localStatus {
+                    Text(status).font(.system(size: 10)).foregroundStyle(store.channel == .local ? Theme.ink : Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
