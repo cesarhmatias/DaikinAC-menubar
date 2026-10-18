@@ -96,10 +96,11 @@ extension DeviceHealth {
          "language_code": errorLanguage, "mobile_os": "macOS", "local_reachability": localReachable]
     }
 
-    static func runDiagnostics(tokens: CognitoTokens, cognitoID: String, thingID: String) async throws -> DiagnosticReport {
+    // `localReachable` tells the service the unit answers on the local network, as the app reports it.
+    static func runDiagnostics(tokens: CognitoTokens, cognitoID: String, thingID: String, localReachable: Bool) async throws -> DiagnosticReport {
         guard let sub = tokens.sub else { throw DaikinError.message("The ID token has no sub claim.") }
         let json = try await DaikinAPI.post(DaikinEndpoint.diagnostics, body: diagnosticsBody(thingID: thingID, cognitoID: cognitoID, sub: sub,
-                                                                                           accessToken: tokens.accessToken, localReachable: false),
+                                                                                           accessToken: tokens.accessToken, localReachable: localReachable),
                                             idToken: tokens.idToken, shape: "diagnostics")
         return parseDiagnostics(try APIStatus.statusCode(json, endpoint: "diagnostics"))
     }

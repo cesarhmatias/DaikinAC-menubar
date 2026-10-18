@@ -380,7 +380,8 @@ struct StoredSession: Codable {
         do {
             let credentials = try await validCredentials()
             guard let cognitoID = credentials.identityID else { throw DaikinError.message("The Identity Pool returned no IdentityId.") }
-            diagnostics = try await DeviceHealth.runDiagnostics(tokens: try await validTokens(), cognitoID: cognitoID, thingID: thing.id)
+            diagnostics = try await DeviceHealth.runDiagnostics(tokens: try await validTokens(), cognitoID: cognitoID, thingID: thing.id,
+                                                                localReachable: channel == .local)
         } catch {
             self.error = "Could not run diagnostics: \(error.localizedDescription)"
         }
