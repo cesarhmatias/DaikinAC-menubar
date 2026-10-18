@@ -7,8 +7,10 @@ PROJECT_ROOT="$PWD"
 BUILD_ROOT="$(mktemp -d /tmp/daikinac-menubar-build.XXXXXX)"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 cp "$PROJECT_ROOT/Package.swift" "$BUILD_ROOT/Package.swift"
+cp "$PROJECT_ROOT/Package.resolved" "$BUILD_ROOT/Package.resolved"
 cp -R "$PROJECT_ROOT/Sources" "$BUILD_ROOT/Sources"
-swift build --package-path "$BUILD_ROOT" --scratch-path "$BUILD_ROOT/.build" -c release \
+# Dependencies come only from the pinned revisions in Package.resolved.
+swift build --package-path "$BUILD_ROOT" --scratch-path "$BUILD_ROOT/.build" -c release --force-resolved-versions \
   -Xswiftc -file-prefix-map -Xswiftc "$PROJECT_ROOT=." \
   -Xswiftc -file-prefix-map -Xswiftc "$BUILD_ROOT=." \
   -Xswiftc -debug-prefix-map -Xswiftc "$PROJECT_ROOT=." \

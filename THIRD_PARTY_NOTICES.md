@@ -40,6 +40,38 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## BigInt (dependency)
+
+[`attaswift/BigInt`](https://github.com/attaswift/BigInt) provides the big-integer math for Cognito
+`USER_SRP_AUTH`. It is the project's only dependency, pinned exactly to version 5.7.0 (revision
+`e07e00fa1fd435143a2dcf8b7eec9a7710b2fdfe` in `Package.resolved`) and compiled into the app.
+Version 5.7.0 is used rather than 6.x because 6.x requires the Swift 6 toolchain and changes nothing
+this project uses.
+
+BigInt is distributed under the MIT License:
+
+```text
+Copyright (c) 2016-2017 Károly Lőrentey
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## References (not bundled, no code copied)
 
 Daikin Brazil publishes open-source projects for the same devices, all under the MIT License
@@ -53,5 +85,11 @@ Daikin Brazil publishes open-source projects for the same devices, all under the
   entries with the published table in the self-check.
 - [`daikin-br/ha-matterbridge-integration`](https://github.com/daikin-br/ha-matterbridge-integration):
   setup guide only.
+
+The Cognito SRP exchange follows the public behavior of
+[`aws/amazon-cognito-identity-js`](https://github.com/aws-amplify/amplify-js) and
+[`pycognito`](https://github.com/NabuCasa/pycognito) (Apache License 2.0). The Swift code is this
+project's own. pycognito 2024.5.1 was run offline only to compute the fixed reference values that
+`--self-check` compares against; it is not bundled.
 
 SF Symbols are provided by macOS and used under Apple's terms; none are bundled.
