@@ -194,8 +194,9 @@ struct StoredSession: Codable {
     private var connecting = false
     static let localPollInterval: Duration = .seconds(10)
 
-    // Tries the unit on the local network first (mDNS + a decrypted GET /acstatus proves it is
-    // this device), then falls back to the cloud shadow.
+    // Opens the cloud shadow (when signed in) and tries the unit on the local network at the
+    // same time, so the controls never wait for the slower one. A decrypted GET /acstatus proves
+    // the local unit is this device; once it answers, the cloud connection is dropped.
     func connectBest() async {
         guard panelVisible, connection == nil, localEndpoint == nil, !connecting else { return }
         // Signed in: the selected device from GET_THING_INFO. Signed out: the saved local device.
@@ -205,21 +206,28 @@ struct StoredSession: Codable {
         else { return }
         connecting = true
         defer { connecting = false }
+        if signedIn { Task { await self.connectShadow() } }
         if preferLocal || !signedIn, let text = target.key, let key = LocalChannel.key(fromDeviceKey: text) {
-            reading = true
+            if state == nil { reading = true }
             let units = await LocalDiscovery.browse()
             var failures: [String] = []
             for unit in LocalDiscovery.candidates(units, apn: target.apn) {
                 guard panelVisible, selectedThing?.id == target.id || !signedIn else { reading = false; return }
                 do {
-                    guard let endpoint = await LocalDiscovery.localAPIEndpoint(for: unit.endpoint) else {
-                        throw DaikinError.message("Could not resolve the unit's address.")
+                    // The unit's hostname (thing_apn + ".local", as the HA integration documents) is the fallback.
+                    var resolved = await LocalDiscovery.localAPIEndpoint(for: unit.endpoint)
+                    if resolved == nil, let apn = target.apn, !apn.isEmpty, let port = NWEndpoint.Port(rawValue: LocalChannel.port) {
+                        resolved = .hostPort(host: .name(apn + ".local", nil), port: port)
                     }
+                    guard let endpoint = resolved else { throw DaikinError.message("Could not resolve the unit's address.") }
                     let reported = try await LocalChannel.status(at: endpoint, key: key)
-                    localEndpoint = endpoint; localKey = key; channel = .local
+                    localEndpoint = endpoint; localKey = key
+                    disconnectShadow(keepCommand: true)
+                    channel = .local
                     localStatus = "Connected on the local network."
                     applyLocal(reported)
                     startLocalPolling()
+                    await flushQueuedCommand()
                     return
                 } catch {
                     failures.append(error.localizedDescription)
@@ -232,13 +240,13 @@ struct StoredSession: Codable {
                 ResponseShapes.record("local-attempt", data: data, status: 0)
             }
         }
-        guard signedIn, panelVisible, let thing = selectedThing, thing.id == target.id else { return }
-        await connectShadow()
     }
 
     private func applyLocal(_ reported: Port1) {
         reading = false
         state = reported; pendingDesired = nil; lastRead = Date()
+        // A command sent over the cloud just before switching to local is confirmed here.
+        if let command = sendingCommand, queuedCommand == nil, reported.satisfies(command) { finishCommand(notice: "Applied by the AC.") }
     }
 
     private func startLocalPolling() {
@@ -289,7 +297,8 @@ struct StoredSession: Codable {
         self.connection = connection
         reading = true
         connection.onDocument = { [weak self] document in
-            guard let self, self.selectedThing?.id == thing.id else { return }
+            // Ignore a late cloud document once the local channel has taken over.
+            guard let self, self.selectedThing?.id == thing.id, self.localEndpoint == nil else { return }
             self.reading = false
             self.channel = .cloud
             self.state = document.reported
@@ -312,16 +321,17 @@ struct StoredSession: Codable {
             guard let sub = tokens?.sub else { throw DaikinError.message("The ID token has no sub claim.") }
             // A client ID of our own: reusing the phone app's (the bare sub) would disconnect it.
             try await connection.open(clientID: sub + "-mac", credentials: credentials)
+            if localEndpoint == nil { await flushQueuedCommand() }
         } catch {
             connection.close(error)
         }
     }
 
-    func disconnectShadow() {
+    func disconnectShadow(keepCommand: Bool = false) {
         let current = connection
         connection = nil
-        reading = false
-        if sendingCommand != nil { finishCommand(notice: nil) }
+        if !keepCommand { reading = false }
+        if sendingCommand != nil, !keepCommand { finishCommand(notice: nil) }
         current?.close()
     }
 
@@ -434,9 +444,18 @@ struct StoredSession: Codable {
     // MARK: Commands
 
     private var commandTimeout: Task<Void, Never>?
-    // A channel must be open; the current state need not be known yet (the user's choice):
-    // a command sent before the first read simply overrides whatever the unit is doing.
-    var canSendCommands: Bool { commandsAllowed && (connection != nil || localEndpoint != nil) && sendingCommand == nil }
+    // The current state need not be known (the user's choice): a command sent before the first
+    // read overrides whatever the unit is doing. If no channel is open yet, it waits for one.
+    var canSendCommands: Bool { commandsAllowed && sendingCommand == nil && (signedIn || localDevice != nil) }
+    private var queuedCommand: Port1?
+
+    private func flushQueuedCommand() async {
+        guard let change = queuedCommand else { return }
+        queuedCommand = nil
+        commandTimeout?.cancel(); commandTimeout = nil
+        sendingCommand = nil
+        await send(change)
+    }
     var availableModes: [ACMode] { unitType?.uppercased() == "COOL_ONLY" ? ACMode.allCases.filter { $0 != .heat } : ACMode.allCases }
 
     // Sends one change. The command counts as applied once the
@@ -457,7 +476,17 @@ struct StoredSession: Codable {
             }
             return
         }
-        guard let connection else { finishCommand(notice: nil); return }
+        guard let connection, connection.ready else {
+            // No channel yet: keep the command until the local or cloud connection opens.
+            queuedCommand = change
+            commandTimeout = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(20))
+                guard !Task.isCancelled, let self, self.queuedCommand != nil else { return }
+                self.finishCommand(notice: nil)
+                self.error = "Could not reach the AC to send the command."
+            }
+            return
+        }
         do {
             try await connection.publishDesired(change)
         } catch {
@@ -475,7 +504,7 @@ struct StoredSession: Codable {
 
     private func finishCommand(notice: String?) {
         commandTimeout?.cancel(); commandTimeout = nil
-        sendingCommand = nil
+        sendingCommand = nil; queuedCommand = nil
         self.notice = notice
     }
 
